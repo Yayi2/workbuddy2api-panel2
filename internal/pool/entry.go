@@ -30,10 +30,13 @@ type Status struct {
 	UID             string    `json:"uid"`
 	Nickname        string    `json:"nickname,omitempty"`
 	Credits         int64     `json:"credits"`
+	// CreditsTotal 积分总额度（各套餐聚合）；0 = 未知（旧 state / 查询失败）。
+	// 官方 v1.6.3：面板据此显示「剩余 / 总额」与账号自身百分比进度条。
+	CreditsTotal int64 `json:"credits_total,omitempty"`
 	// Region 账号所属站点（"cn" 国内站 / "intl" 国际站），源自凭据文件 edition 字段。
-	Region          string    `json:"region"`
-	RegionLabel     string    `json:"region_label"`      // "国内站" / "国际站"（面板直接展示）
-	RegionGrowth    bool      `json:"region_growth"`     // 该站点是否有成长中心（国际站 false → 任务/旅行 N/A）
+	Region       string `json:"region"`
+	RegionLabel  string `json:"region_label"`  // "国内站" / "国际站"（面板直接展示）
+	RegionGrowth bool   `json:"region_growth"` // 该站点是否有成长中心（国际站 false → 任务/旅行 N/A）
 	Cooling         bool      `json:"cooling"`
 	CoolKind        string    `json:"cool_kind,omitempty"`
 	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
@@ -58,6 +61,7 @@ type Status struct {
 type entry struct {
 	a            *auth.Auth
 	credits      int64
+	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
 	successCount int64     // 累计成功
 	errTotal     int64     // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
 	lastErr      time.Time // 最近一次错误时间
@@ -105,6 +109,14 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
+// modelExempt 报告账号是否处于"6004 模型级软冷却"豁免形态：
+// 冷却由 6004 触发（softRateModel 非空）、类别为软冷却、且未禁用未熔断。
+// 这是 healthyForModel（chat 选号）与 ServableNow（探活）共享的豁免语义来源
+// （source of truth），保证两条路径对"模型级限额"的判定一致。
+func (e *entry) modelExempt() bool {
+	return e.coolKind == CoolSoft && e.softRateModel != "" && !e.disabled && e.breakerUntil.IsZero()
+}
+
 // healthyForModel 报告账号对指定 model 是否可选（含模型级豁免）：
 // 冷却为由 6004 触发的**模型级**软冷却（softRateModel 非空）且请求模型不同
 // （softRateModel != reqModel）时，跳过冷却判定——该模型限流不代表账号在其他
@@ -148,6 +160,7 @@ func (e *entry) fallbackKind(now time.Time) string {
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
 	Credits      int64     `json:"credits"`
+	CreditsTotal int64     `json:"credits_total,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`

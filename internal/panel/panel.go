@@ -75,6 +75,10 @@ type Panel struct {
 	// 不同账号之间不互斥（并行照旧）。TryLock 语义，锁条目常驻（账号数有界）。
 	taskMu    sync.Mutex
 	taskLocks map[string]*sync.Mutex
+
+	// 任务中心执行队列（taskcenter.go）。
+	queueOnce sync.Once
+	q         *queueState
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -149,6 +153,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
+	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
+	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
+	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
+	p.mux.HandleFunc("GET /panel/api/school/status", p.withAuth(p.schoolStatus))
+	p.mux.HandleFunc("POST /panel/api/school/run_all", p.withAuth(p.schoolRunAll))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
 	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
@@ -217,9 +226,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// logsHandler 返回日志环形缓冲快照（时间升序）。
+// logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"lines": p.logs.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
 }
 
 // models 返回模型清单与 reasoning 实际档位，**按站点分别提供**，面板可自由切换。
@@ -460,15 +469,16 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
-	remain, err := p.cfg.Upstream.UserResource(a)
+	remain, total, err := p.cfg.Upstream.UserResource(a)
 	if err != nil {
 		resp["balance_error"] = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	p.cfg.Pool.ReenableIfCredits(uid, remain)
+	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
 	resp["credits"] = remain
-	log.Printf("panel: checkin uid=%s msg=%q credits=%d", uid, checkinMsg, remain)
+	resp["credits_total"] = total
+	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -480,13 +490,13 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	remain, err := p.cfg.Upstream.UserResource(a)
+	remain, total, err := p.cfg.Upstream.UserResource(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCredits(uid, remain)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain})
+	p.cfg.Pool.SetCredits(uid, remain, total)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 
 // accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。

@@ -48,6 +48,13 @@ type loginIntent struct {
 	region  string
 }
 
+// loginDefaultUA 登录流程的默认 UA（官方桌面端三段式）。
+//
+// 登录走本文件自有的 HTTP 路径（不复用 upstream.Client），故需要自己的默认值。
+// 与 upstream 的默认保持一致，避免"登录时一个指纹、登录后另一个指纹"。
+// Profile.ClientUA 非空时按站点覆盖（保留本地按站点可配能力）。
+const loginDefaultUA = "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
+
 // commonHeadersFor 按站点设置通用伪装头。
 func commonHeadersFor(req *http.Request, p *upstream.Profile) {
 	req.Header.Set("Content-Type", "application/json")
@@ -55,7 +62,11 @@ func commonHeadersFor(req *http.Request, p *upstream.Profile) {
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Origin", p.Origin)
 	req.Header.Set("Referer", p.Origin+"/")
-	req.Header.Set("User-Agent", p.ClientUA)
+	ua := p.ClientUA
+	if ua == "" {
+		ua = loginDefaultUA
+	}
+	req.Header.Set("User-Agent", ua)
 }
 
 // endpointAuthState / endpointAuthToken / endpointLoginAcct 按站点拼端点 URL。
@@ -291,6 +302,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	//     可正常合计），**照常执行**——否则面板「刷新」与后台余额轮询对国际站全失效。
 	checkinMsg := ""
 	remain := int64(-1)
+	total := int64(0)
 	if upstream.SupportsCheckin(prof.Key) {
 		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 			checkinMsg = err.Error()
@@ -299,9 +311,9 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		checkinMsg = "国际站未开启签到活动，跳过首次签到"
 	}
 	if upstream.SupportsBalanceAPI(prof.Key) {
-		if rm, err := p.cfg.Upstream.UserResource(a); err == nil {
-			remain = rm
-			p.cfg.Pool.ReenableIfCredits(acct.UID, rm)
+		if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+			remain, total = rm, tt
+			p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
 		}
 	}
 
@@ -314,6 +326,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		"uid":             acct.UID,
 		"nickname":        acct.Nickname,
 		"credits":         remain,
+		"credits_total":   total,
 		"region":          prof.Key,
 		"region_label":    prof.Label,
 		"checkin_message": checkinMsg,
