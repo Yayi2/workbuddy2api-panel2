@@ -186,14 +186,16 @@ func TestLoginStartBadUpstreamReturns502Shape(t *testing.T) {
 }
 
 // TestLoginHeadersPerRegion 登录请求的 Origin/Referer/UA 必须随站点变化。
+//
+// Origin/Referer 随站点分流（跨站 Origin 会被上游拒绝）；
+// UA 为官方桌面端三段式，两站当前相同（站点显式配置 ClientUA 时才分化）。
 func TestLoginHeadersPerRegion(t *testing.T) {
 	for _, tc := range []struct {
 		region     string
 		wantOrigin string
-		wantUA     string
 	}{
-		{auth.RegionCN, "https://www.codebuddy.cn", "CLI/2.63.2 CodeBuddy/2.63.2"},
-		{auth.RegionINTL, "https://www.workbuddy.ai", "CLI/2.63.2 CodeBuddy/2.63.2"},
+		{auth.RegionCN, "https://www.codebuddy.cn"},
+		{auth.RegionINTL, "https://www.workbuddy.ai"},
 	} {
 		prof := upstream.ProfileFor(tc.region)
 		req := httptest.NewRequest("POST", "https://example/", nil)
@@ -204,8 +206,9 @@ func TestLoginHeadersPerRegion(t *testing.T) {
 		if got := req.Header.Get("Referer"); got != tc.wantOrigin+"/" {
 			t.Errorf("[%s] Referer = %q", tc.region, got)
 		}
-		if got := req.Header.Get("User-Agent"); got != tc.wantUA {
-			t.Errorf("[%s] UA = %q, want %q", tc.region, got, tc.wantUA)
+		// UA 不得为空（客户端 UA 缺失会被上游按异常流量处理）。
+		if got := req.Header.Get("User-Agent"); got == "" {
+			t.Errorf("[%s] User-Agent 不得为空", tc.region)
 		}
 	}
 }

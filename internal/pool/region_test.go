@@ -175,9 +175,9 @@ func TestCountsByRegion(t *testing.T) {
 	addRegion(p, "cn-1", auth.RegionCN)
 	addRegion(p, "cn-2", auth.RegionCN)
 	addRegion(p, "intl-1", auth.RegionINTL)
-	p.SetCredits("cn-1", 100)
-	p.SetCredits("cn-2", 50)
-	p.SetCredits("intl-1", 75)
+	p.SetCredits("cn-1", 100, 0)
+	p.SetCredits("cn-2", 50, 0)
+	p.SetCredits("intl-1", 75, 0)
 	p.Cooldown("cn-2", CoolSoft, time.Hour, "429")
 	p.Disable("intl-1", "manual")
 

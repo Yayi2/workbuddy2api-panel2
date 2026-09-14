@@ -200,9 +200,9 @@ func TestWeightedStrategyIgnoresOrder(t *testing.T) {
 	addRegion(p, "w2", auth.RegionCN)
 	addRegion(p, "w3", auth.RegionCN)
 	// 不调用 SetStrategy → 默认 weighted。
-	p.SetCredits("w1", 1000)
-	p.SetCredits("w2", 1000)
-	p.SetCredits("w3", 1000)
+	p.SetCredits("w1", 1000, 0)
+	p.SetCredits("w2", 1000, 0)
+	p.SetCredits("w3", 1000, 0)
 
 	// 即使把某个账号排到最后，weighted 仍会（按权重随机地）用到它。
 	p.MoveAccount("w1", 2)

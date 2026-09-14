@@ -24,6 +24,32 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// 任务中心适用性判定
+// ---------------------------------------------------------------------------
+
+// regionSupportsGrowthTasks 报告该账号所属站点是否支持**本项目的成长任务体系**。
+//
+// 为什么任务中心必须排除国际站：两站的 growth 接口虽然同名，但 schema 完全不同——
+//
+//	国内站 GET /v2/activity/growth/tasks → {task_code, progress{current,target},
+//	                                        reward_credit, accept_status}（18 个任务）
+//	国际站 同路径                        → {task_id, code, title, status}（5 个任务，
+//	                                        无 progress / 无 reward / 字段名不同）
+//
+// 本项目 ListTasks 按国内站 schema 解析，对国际站会得到 `task_code` 为空、进度恒 0
+// 的**幽灵条目**：任务中心会列出 5 条点不动的待办，队列执行时又会拿空 task_code 去
+// 接受/领奖（必然失败）。开学季同理（/portal/activity/school 是国站运营活动）。
+//
+// 故任务中心、开学季视图、执行队列一律只处理 `Growth` 站点账号；
+// 国际站账号在面板上仍可正常对话、查余额、保活（那三项国际站都可用）。
+func regionSupportsGrowthTasks(a *auth.Auth) bool {
+	if a == nil {
+		return false
+	}
+	return upstream.IsGrowthRegion(a.Region())
+}
+
+// ---------------------------------------------------------------------------
 // 扫描（只读）
 // ---------------------------------------------------------------------------
 
@@ -69,25 +95,41 @@ func schoolPending(t upstream.SchoolTask) bool {
 	}
 }
 
-// tasksScanAll 扫描全部账号：成长任务（未完成+可自动化）+ 开学季（未完成）。
+// tasksScanAll 扫描全部**支持成长任务**的账号：成长任务（未完成+可自动化）+ 开学季（未完成）。
 // 只读操作，并发拉取（账号数个位数）。
+// 国际站账号跳过（其 growth tasks 是另一套 schema，扫出来的条目无法执行，见
+// regionSupportsGrowthTasks 注释）。
 func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 	states := p.cfg.Pool.List()
-	items := make([]scanAccountItem, len(states))
-	var wg sync.WaitGroup
-	for i, st := range states {
+	// 先筛出**参与扫描**的账号，再为它们建结果槽。
+	// 不能按 len(states) 建定长切片后 continue——被跳过的账号会留下**空结构体**，
+	// 前端会渲染出一行空白账号（实测发现）。
+	type target struct {
+		uid, nickname string
+	}
+	var targets []target
+	for _, st := range states {
 		if st.Disabled {
 			continue
 		}
+		a := p.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || !regionSupportsGrowthTasks(a) {
+			continue
+		}
+		targets = append(targets, target{uid: st.UID, nickname: a.Nickname})
+	}
+	items := make([]scanAccountItem, len(targets))
+	var wg sync.WaitGroup
+	for i, tg := range targets {
 		wg.Add(1)
-		go func(i int, uid string) {
+		go func(i int, uid, nickname string) {
 			defer wg.Done()
 			a := p.cfg.Pool.AuthByUID(uid)
 			if a == nil {
 				return
 			}
 			it := &items[i]
-			it.UID, it.Nickname = uid, a.Nickname
+			it.UID, it.Nickname = uid, nickname
 			if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
 				it.GrowthErr = err.Error()
 			} else {
@@ -109,7 +151,7 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		}(i, st.UID)
+		}(i, tg.uid, tg.nickname)
 	}
 	wg.Wait()
 	pending := 0
@@ -195,8 +237,8 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(st.UID)
-		if a == nil {
-			continue
+		if a == nil || !regionSupportsGrowthTasks(a) {
+			continue // 国际站无本项目的成长任务体系（见 regionSupportsGrowthTasks）
 		}
 		wg.Add(1)
 		go func(a *auth.Auth, wantSchool bool) {
@@ -456,6 +498,8 @@ func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // schoolStatus 全账号开学季任务状态（含抽奖余额）。
+// 国际站账号跳过：开学季是国站运营活动，国际站无该活动入口
+// （见 regionSupportsGrowthTasks）。
 func (p *Panel) schoolStatus(w http.ResponseWriter, r *http.Request) {
 	states := p.cfg.Pool.List()
 	type acctView struct {
@@ -474,7 +518,7 @@ func (p *Panel) schoolStatus(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(st.UID)
-		if a == nil {
+		if a == nil || !regionSupportsGrowthTasks(a) {
 			continue
 		}
 		wg.Add(1)

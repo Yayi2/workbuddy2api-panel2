@@ -115,7 +115,7 @@ var profileCN = Profile{
 	WebBase:     "https://www.workbuddy.cn",
 	Origin:      "https://www.codebuddy.cn",
 	Platform:    "VSCode",
-	ClientUA:    clientUA,
+	ClientUA:    "", // 空 = 用官方默认 UA（headers.go 的 defaultWorkBuddyUA）
 	LoginTTL:    5 * time.Minute,
 	Growth:      true,
 	ModelsAPI:   true,
@@ -134,7 +134,7 @@ var profileINTL = Profile{
 	WebBase:     "https://www.workbuddy.ai",
 	Origin:      "https://www.workbuddy.ai",
 	Platform:    "workbuddy-ai",
-	ClientUA:    clientUA,
+	ClientUA:    "", // 空 = 用官方默认 UA（headers.go 的 defaultWorkBuddyUA）
 	LoginTTL:    15 * time.Minute,
 	Growth:      false,
 	ModelsAPI:   false, // 该站未挂载 /console/enterprises/personal/models（实测返回裸 HTML 500）

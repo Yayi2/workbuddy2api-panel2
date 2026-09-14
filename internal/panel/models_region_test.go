@@ -23,7 +23,7 @@ func modelsTestPanel(t *testing.T, base string, accounts ...*auth.Auth) *Panel {
 	for _, a := range accounts {
 		p.Add(a)
 		if a.Region() != auth.RegionINTL {
-			p.SetCredits(a.UID, 1000)
+			p.SetCredits(a.UID, 1000, 0)
 		}
 	}
 	up := upstream.New()

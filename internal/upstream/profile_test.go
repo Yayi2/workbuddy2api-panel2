@@ -158,7 +158,7 @@ func TestHeadersOriginByRegion(t *testing.T) {
 
 	// ChatHeaders 沿用 common 的站点 Origin，且仍不得携带 refresh token。
 	reqChat, _ := http.NewRequest(http.MethodPost, "https://x/", nil)
-	c.ChatHeaders(reqChat, intl)
+	c.ChatHeaders(reqChat, intl, "")
 	if got := reqChat.Header.Get("Origin"); got != "https://www.workbuddy.ai" {
 		t.Errorf("INTL chat Origin = %q", got)
 	}
@@ -203,16 +203,28 @@ func TestRegionOverrides(t *testing.T) {
 }
 
 // TestUserAgentOverrideStillWins 全局 UA 覆盖（issue #42）优先级不变。
+//
+// 合并官方 v1.6.3 后语义调整：**默认路径不再走站点 UA**，改用官方默认的真实
+// 桌面端三段式 `WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1`
+//（官方逆向所得，比旧的 `CLI/2.63.2 CodeBuddy/2.63.2` 更贴近真实指纹）。
+// 站点 UA 仅在**显式配置覆盖**时生效（保留本地"按站点可配 UA"的能力）。
 func TestUserAgentOverrideStillWins(t *testing.T) {
 	c := New()
 	c.UserAgent = "CustomUA/9.9"
 	if got := c.userAgent(&auth.Auth{UID: "u1", Edition: auth.RegionINTL}); got != "CustomUA/9.9" {
 		t.Errorf("userAgent = %q, want CustomUA/9.9", got)
 	}
-	// 未覆盖时按站点 Profile 取（当前两站内置 UA 相同）。
+	// 未覆盖时用官方默认三段式（而非站点内置 UA）。
 	c2 := New()
-	if got := c2.userAgent(&auth.Auth{UID: "u1", Edition: auth.RegionINTL}); got != clientUA {
-		t.Errorf("userAgent = %q, want %q", got, clientUA)
+	want := c2.defaultWorkBuddyUA()
+	if got := c2.userAgent(&auth.Auth{UID: "u1", Edition: auth.RegionINTL}); got != want {
+		t.Errorf("userAgent = %q, want 官方默认 %q", got, want)
+	}
+	// 站点显式配置 UA 时，站点值优先于官方默认。
+	c3 := New()
+	c3.SetRegionOverrides(RegionOverrides{}, RegionOverrides{UserAgent: "IntlUA/1.0"})
+	if got := c3.userAgent(&auth.Auth{UID: "u1", Edition: auth.RegionINTL}); got != "IntlUA/1.0" {
+		t.Errorf("站点覆盖 UA = %q, want IntlUA/1.0", got)
 	}
 }
 
