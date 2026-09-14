@@ -16,15 +16,11 @@ import (
 
 // RunStreakBonusNow 对所有可用账号执行连登兑换 + 抽奖（幂等：locked/无次数自动跳过）。
 // 由签到排程（RunCheckinNow）末尾调用；也可面板手动触发。
+// RunStreakBonusNow 对所有**支持成长中心**的账号执行连登管家。
+// 国际站无本网关实现的成长中心（streak 实测 500），由 growthAccounts 过滤掉，
+// 避免每个签到周期都刷一批必然失败的日志。
 func (s *Scheduler) RunStreakBonusNow() {
-	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
-			continue
-		}
-		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.AccessToken == "" {
-			continue
-		}
+	for _, a := range s.growthAccounts(true) {
 		s.streakBonusAccount(a)
 	}
 }

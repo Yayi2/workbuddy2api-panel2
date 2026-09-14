@@ -99,6 +99,7 @@ func (p *Pool) load() {
 	if json.Unmarshal(raw, &sf) != nil {
 		return
 	}
+	p.order = sf.Order
 	p.applyAccountsLocked(sf.Accounts)
 }
 
@@ -132,6 +133,9 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
 	p.applyAccountsLocked(s.Accounts)
+	if len(s.Order) > 0 {
+		p.order = s.Order
+	}
 }
 func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
@@ -186,6 +190,9 @@ func (p *Pool) notePersistFail(err error) {
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。
 func (p *Pool) stateOverviewLocked() stateFile {
 	sf := stateFile{Accounts: map[string]stateAccount{}}
+	// 只持久化"仍然存在"的账号顺序：已删除账号的 uid 不应无限累积在状态文件里
+	// （且 orderLocked 已把它们过滤掉展示，落盘保持一致）。
+	sf.Order = p.orderLocked()
 	for uid, e := range p.byUID {
 		sf.Accounts[uid] = stateAccount{
 			Credits:      e.credits,

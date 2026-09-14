@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -15,11 +14,12 @@ import (
 // 后者路径不存在，曾导致长期 400 "task not completed" 误判为"上游不支持领取"。
 func TestClaimRewardWebEndpoint(t *testing.T) {
 	var gotPath, gotMethod, gotBody string
-	var gotPlatform, gotReferer string
+	var gotPlatform, gotReferer, gotOriginHeader string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotMethod = r.URL.Path, r.Method
 		gotPlatform = r.Header.Get("x-client-platform")
 		gotReferer = r.Header.Get("Referer")
+		gotOriginHeader = r.Header.Get("Origin")
 		buf := make([]byte, 64)
 		n, _ := r.Body.Read(buf)
 		gotBody = string(buf[:n])
@@ -49,8 +49,15 @@ func TestClaimRewardWebEndpoint(t *testing.T) {
 	if gotPlatform != "web" {
 		t.Errorf("x-client-platform=%q want web", gotPlatform)
 	}
-	if !strings.Contains(gotReferer, "workbuddy.cn") {
-		t.Errorf("Referer=%q 应指向 workbuddy.cn", gotReferer)
+	// Referer/Origin 必须与请求落地的 web 域**同站**（注入测试服务器即 srv.URL）。
+	// 原先断言字面量 "workbuddy.cn"——那只在国内站无注入时成立；引入国际站后
+	// web 域随账号 region 变化，真正的不变量是"Referer 由 webBase 派生、带成长中心路径"，
+	// 故改为对注入域断言（国内站默认域另有 case 覆盖，见 region_test.go）。
+	if gotReferer != srv.URL+"/profile/growth-center" {
+		t.Errorf("Referer=%q 应由 webBase 派生并带成长中心路径", gotReferer)
+	}
+	if gotOrigin := gotOriginHeader; gotOrigin != srv.URL {
+		t.Errorf("Origin=%q 应与 web 域同站", gotOrigin)
 	}
 }
 

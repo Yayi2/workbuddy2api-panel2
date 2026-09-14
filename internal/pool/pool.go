@@ -35,6 +35,14 @@ type Pool struct {
 	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
 	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
 	persistFails int
+
+	// strategy 选号策略（SetStrategy 注入；默认 StrategyWeighted = 既有行为不变）。
+	strategy string
+	// order 账号优先级顺序（uid 列表，靠前者优先）。仅 priority/round_robin 使用；
+	// 持久化在 state.json 的 order 字段；未列出的账号按 uid 升序追加到末尾。
+	order []string
+	// rrCursor round_robin 的上次使用位置（运行态，不持久化；重启从头开始可接受）。
+	rrCursor string
 }
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
@@ -47,6 +55,7 @@ func New(stateFp string) *Pool {
 		breakerCooldownMax: defaultBreakerCooldownMax,
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
+		strategy:           StrategyWeighted,
 	}
 	if stateFp != "" {
 		p.load()

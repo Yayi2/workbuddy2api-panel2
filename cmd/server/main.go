@@ -60,6 +60,15 @@ func main() {
 		log.Fatalf("load auths: %v", err)
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
+	// 站点分布：混挂部署下这是判断"国际站账号有没有被正确识别"的第一现场。
+	// 老账号无 edition 字段 → 归为国内站（向后兼容），此处会如实体现。
+	if len(auths) > 0 {
+		byRegion := map[string]int{}
+		for _, a := range auths {
+			byRegion[a.Region()]++
+		}
+		log.Printf("账号站点分布：国内站 %d，国际站 %d", byRegion[auth.RegionCN], byRegion[auth.RegionINTL])
+	}
 
 	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
 	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
@@ -75,6 +84,11 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur) // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+	// 选号策略：weighted（默认）/ priority（手动优先级）/ round_robin（轮流）。
+	p.SetStrategy(cfg.Pool.Strategy)
+	if s := pool.NormalizeStrategy(cfg.Pool.Strategy); s != pool.StrategyWeighted {
+		log.Printf("选号策略：%s（%s）", pool.StrategyLabel(s), s)
+	}
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -113,6 +127,26 @@ func main() {
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
 	// 出站 UA 覆盖（issue #42）：非空才改写，空 = 现状 clientUA（指纹净化考虑）。
 	up.UserAgent = cfg.Upstream.UserAgent
+	// 站点参数覆盖：全部留空时使用内置实测值（国内站 copilot.tencent.com /
+	// 国际站 www.workbuddy.ai）。仅在国际站域变更等场景需要显式配置。
+	up.SetRegionOverrides(
+		upstream.RegionOverrides{
+			ChatBase:    cfg.Regions.CN.ChatBase,
+			BillingBase: cfg.Regions.CN.BillingBase,
+			WebBase:     cfg.Regions.CN.WebBase,
+			Origin:      cfg.Regions.CN.Origin,
+			Platform:    cfg.Regions.CN.Platform,
+			UserAgent:   cfg.Regions.CN.UserAgent,
+		},
+		upstream.RegionOverrides{
+			ChatBase:    cfg.Regions.INTL.ChatBase,
+			BillingBase: cfg.Regions.INTL.BillingBase,
+			WebBase:     cfg.Regions.INTL.WebBase,
+			Origin:      cfg.Regions.INTL.Origin,
+			Platform:    cfg.Regions.INTL.Platform,
+			UserAgent:   cfg.Regions.INTL.UserAgent,
+		},
+	)
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:              p,
@@ -302,6 +336,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
+	p.SetStrategy(newCfg.Pool.Strategy) // 选号策略热生效（面板切换即时应用）
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
 		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,

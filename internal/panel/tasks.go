@@ -11,10 +11,30 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // acceptBatchGap 批量接受的批间节流（对齐脚本 1.05s 口径，避免上游风控）。
 var acceptBatchGap = 1050 * time.Millisecond
+
+// growthUnsupportedMsg 国际站账号访问成长中心接口时的统一拒绝文案。
+//
+// 成长中心（签到/连登/猫猫旅行/积分任务）是国内站运营活动：国际站为同域部署的
+// 另一套实现，不提供 /activity/growth/* 端点。对着必然 404 的路径盲发请求只会
+// 产生错误噪声并浪费上游配额，故在面板层显式拦截并给出可读原因。
+const growthUnsupportedMsg = "国际站账号无成长中心（积分任务/签到/旅行仅国内站提供）"
+
+// requireGrowth 校验账号所属站点是否支持成长中心；不支持时写 400 并返回 false。
+//
+// 用 400（客户端请求不适用于该资源）而非 501：这是"该账号这个功能不存在"，
+// 面板前端据此把按钮置灰；400 语义上比"服务未实现"更准确。
+func (p *Panel) requireGrowth(w http.ResponseWriter, a *auth.Auth) bool {
+	if !upstream.IsGrowthRegion(a.Region()) {
+		writeErr(w, http.StatusBadRequest, growthUnsupportedMsg)
+		return false
+	}
+	return true
+}
 
 // accountByUID 取账号凭证；不存在时写 404 并返回 nil。
 func (p *Panel) accountByUID(w http.ResponseWriter, uid string) *auth.Auth {
@@ -33,6 +53,9 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	if !p.requireGrowth(w, a) {
+		return
+	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
@@ -46,6 +69,9 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if !p.requireGrowth(w, a) {
 		return
 	}
 	var body struct {
@@ -73,6 +99,9 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if !p.requireGrowth(w, a) {
 		return
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
@@ -121,6 +150,9 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if !p.requireGrowth(w, a) {
 		return
 	}
 	var body struct {

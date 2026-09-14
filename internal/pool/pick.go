@@ -28,9 +28,23 @@ func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *au
 	return p.pick(tried, reqModel)
 }
 
-// pick 在 healthy 候选集中按三因子权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
-// 候选集是 top5 近似：先按三因子权重（weightOf）降序取前 5（credits 只是权重的一个因子，
-// 闲置补偿与成功率同样决定谁进短名单），再在 top5 内做防撞号过滤。
+// PickInRegion 区域限定选号：只在指定站点的账号中选（空 region = 全池，等价 Pick）。
+//
+// 用途：调用方通过 X-WB-Region 头显式要求"只走国际站/只走国内站"时使用。
+// 与参考实现（workbuddy-gateway 全池混挂轮询）不同之处在于本方法提供**可选**的
+// 区域收窄；默认路径（region==""）行为与引入本特性前完全一致。
+//
+// 注意：区域收窄同样作用于全冷却兜底——若国际站账号全在冷却，不应回落到
+// 国内站账号（那会把请求发到与调用方预期不同的计费主体）。区域无候选时返回 nil，
+// 由调用方决定是否放宽。
+func (p *Pool) PickInRegion(region string, tried map[string]bool, reqModel string) *auth.Auth {
+	return p.pickRegion(region, tried, reqModel)
+}
+
+// pick 在 healthy 候选集中按三因子权重加权随机选出账号（全池，无区域限制）。
+// 记录 lastUsed 防并发撞号；候选集是 top5 近似：先按三因子权重（weightOf）降序取前 5
+// （credits 只是权重的一个因子，闲置补偿与成功率同样决定谁进短名单），
+// 再在 top5 内做防撞号过滤。
 // 并发防雪崩：跳过 lastUsed 距今 < minPickGap 的账号（除非 top5 全部刚被用过，
 // 此时退回最近最少使用 LRU 账号），迫使高并发请求发散，而不是全部撞同一高分账号。
 // minPickGap=0（测试用）时过滤恒通过，退化为纯加权随机。
@@ -38,9 +52,36 @@ func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *au
 // 注意：模型豁免只进 normal 选号（候选 healthy 判定）；全冷却兜底不参与模型豁免——
 // 兜底本来就是在"无任何 direct 可用"时的降级，切模型可用性已在 normal 阶段体现。
 func (p *Pool) pick(tried map[string]bool, reqModel string) *auth.Auth {
+	return p.pickRegion("", tried, reqModel)
+}
+
+// pickRegion 是选号的统一实现；region 非空时把候选集收窄到该区域。
+//
+// 区域判定用账号自身的 Region()（源自凭据文件 edition），而非池内冗余字段——
+// 凭证是权威源，避免冗余字段与实际凭证不一致时选错站点。
+func (p *Pool) pickRegion(region string, tried map[string]bool, reqModel string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+	// 空 region 归一为"不限区域"（RegionFilterAny）。
+	region = NormalizeRegionFilter(region)
+
+	// 非默认策略：按用户排定的顺序选号（priority = 取第一个可用；round_robin = 轮流）。
+	// 放在 weighted 逻辑之前，且**完全不复用**其 Top5/加权随机/防撞号机制——
+	// 用户显式排了序就该严格按序，掺入随机或"跳过刚用过的"会让顺序失去意义。
+	// 全冷却兜底两种策略共用（区域内最早到期者），因为"都不可用"时已无顺序可言。
+	switch NormalizeStrategy(p.strategy) {
+	case StrategyPriority, StrategyRoundRobin:
+		if e := p.pickByOrderLocked(region, tried, reqModel, now,
+			NormalizeStrategy(p.strategy) == StrategyRoundRobin); e != nil {
+			return e
+		}
+		return p.pickEarliestExpiryLocked(region, tried, now)
+	}
+
+	matchRegion := func(e *entry) bool {
+		return region == RegionFilterAny || e.a.Region() == region
+	}
 	healthyOf := func(e *entry) bool { return e.healthy(now) }
 	if reqModel != "" {
 		healthyOf = func(e *entry) bool { return e.healthyForModel(now, reqModel) }
@@ -48,6 +89,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel string) *auth.Auth {
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
+			continue
+		}
+		if !matchRegion(e) {
 			continue
 		}
 		if !healthyOf(e) {
@@ -61,7 +105,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel string) *auth.Auth {
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now)
+		return p.pickEarliestExpiryLocked(region, tried, now)
 	}
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿 + 成功率
 	// 根本进不了短名单决策，低 credits 但高成功率/久置的账号会永远排不进 top5。
@@ -119,12 +163,16 @@ func (p *Pool) pick(tried map[string]bool, reqModel string) *auth.Auth {
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
-// 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *auth.Auth {
+// 被 tried 排除、在途占满、区域不匹配的账号同样跳过（维持请求级轮换 + 租约 + 区域语义）。
+// 无任何可用返回 nil。
+func (p *Pool) pickEarliestExpiryLocked(region string, tried map[string]bool, now time.Time) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
+		}
+		if region != RegionFilterAny && e.a.Region() != region {
+			continue // 区域收窄：兜底同样不跨区域（避免发到调用方未预期的计费主体）
 		}
 		if e.disabled {
 			continue // 禁用的账号永不参与兜底

@@ -1,5 +1,9 @@
-// Package headers 构造三类上游请求头（common / chat / billing / refresh）。
+// Package headers 构造四类上游请求头（common / chat / billing / refresh）。
 // 规则来自 docs/api-reference.md §0/§4/§6。
+//
+// 站点相关头（Origin/Referer/UA）自引入国际站后**按账号 region 取 Profile**：
+// 国内站伪装来源 www.codebuddy.cn，国际站 www.workbuddy.ai。发到错误站点的
+// Origin 会被上游判为跨站调用而拒绝，故这里必须与目标域名同站。
 package upstream
 
 import (
@@ -9,21 +13,33 @@ import (
 )
 
 const (
-	clientUA        = "CLI/2.63.2 CodeBuddy/2.63.2"
+	clientUA = "CLI/2.63.2 CodeBuddy/2.63.2"
+	// originRefererCN 国内站伪装来源（保留常量：既有测试与语义以它为基准）。
 	originRefererCN = "https://www.codebuddy.cn"
 )
 
+// originRefererFor 返回账号所属站点的 Origin/Referer 伪装来源。
 func originRefererFor(a *auth.Auth) string {
-	return originRefererCN
+	return ProfileForAuth(a).Origin
 }
 
 // userAgent 返回当前出站 UA：Client.UserAgent 非空则覆盖（全部出站请求生效），
-// 空 = 保持现状 clientUA。指纹净化考虑：默认值不变，仅当用户显式配置才改写。
-func (c *Client) userAgent() string {
+// 空 = 按账号站点取 Profile.ClientUA。
+//
+// 传入账号可让国际站使用其站点 UA；无账号上下文的调用方（如登录流程外的
+// 统一 UA 查询）走国内站 Profile —— 两站内置 UA 当前相同，此分支只是为
+// 未来站点分化预留正确形状。
+func (c *Client) userAgent(a *auth.Auth) string {
 	if c != nil && c.UserAgent != "" {
 		return c.UserAgent
 	}
-	return clientUA
+	if a == nil {
+		if c != nil {
+			return c.profileCNWithOverrides().ClientUA
+		}
+		return clientUA
+	}
+	return c.profileFor(a).ClientUA
 }
 
 // CommonHeaders 设置所有 API 共享的请求头。
@@ -34,7 +50,7 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", c.userAgent())
+	req.Header.Set("User-Agent", c.userAgent(a))
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。

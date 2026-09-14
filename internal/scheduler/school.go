@@ -20,17 +20,11 @@ const (
 	schoolPollGap   = 2500 * time.Millisecond
 )
 
-// RunSchoolNow 对所有可用账号执行开学季活动闭环（幂等：不在期/已领静默跳过）。
+// RunSchoolNow 对所有**支持成长中心**的账号执行开学季活动闭环
+//（幂等：不在期/已领静默跳过；国际站无该活动，由 growthAccounts 过滤）。
 // 由 RunCheckinNow 末尾调用（活动是每日刷新，搭每日签到的车最自然）。
 func (s *Scheduler) RunSchoolNow() {
-	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
-			continue
-		}
-		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.AccessToken == "" {
-			continue
-		}
+	for _, a := range s.growthAccounts(true) {
 		s.schoolAccount(a)
 		time.Sleep(activityAccountDelay)
 	}

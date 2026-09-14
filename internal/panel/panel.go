@@ -12,12 +12,16 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -59,10 +63,11 @@ type Panel struct {
 	started time.Time
 	logs    *Ring
 
-	// logins 进行中的 OAuth 设备授权会话（state → 创建时刻）。
+	// logins 进行中的 OAuth 设备授权会话（state → 会话上下文）。
+	// 上下文里固化站点（region），使轮询阶段不依赖调用方再传 region；
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
 	loginMu sync.Mutex
-	logins  map[string]time.Time
+	logins  map[string]loginIntent
 
 	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
 	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
@@ -111,7 +116,7 @@ func New(cfg Config) *Panel {
 		mux:     http.NewServeMux(),
 		started: time.Now(),
 		logs:    NewRing(500),
-		logins:  map[string]time.Time{},
+		logins:  map[string]loginIntent{},
 	}
 	p.routes()
 	return p
@@ -126,6 +131,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
+	p.mux.HandleFunc("GET /panel/api/regions", p.withAuth(p.regions))
+	// 选号顺序与策略（账号池使用顺序调整）。
+	p.mux.HandleFunc("GET /panel/api/pool/order", p.withAuth(p.poolOrder))
+	p.mux.HandleFunc("POST /panel/api/pool/order", p.withAuth(p.poolSetOrder))
+	p.mux.HandleFunc("POST /panel/api/pool/strategy", p.withAuth(p.poolSetStrategy))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
@@ -199,6 +209,11 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"in_flight_full":  inFlightFull,
 		"accounts":        p.cfg.Pool.List(),
+		// 按站点（国内站/国际站）分组计数：面板统计条与筛选 chips 的数据源。
+		// 无账号的站点也会返回零值条目，使面板能提示"可添加国际站账号"。
+		"regions": p.cfg.Pool.CountsByRegion(),
+		// 池中实际存在账号的站点（筛选 chips 只展示有账号的站点）。
+		"known_regions": p.cfg.Pool.KnownRegions(),
 	})
 }
 
@@ -207,18 +222,74 @@ func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"lines": p.logs.Snapshot()})
 }
 
-// models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：
-// 回答"该模型到底支持哪几档思考"。顺带刷新 client 的 effort 降级能力缓存。
+// models 返回模型清单与 reasoning 实际档位，**按站点分别提供**，面板可自由切换。
+//
+// 两个站点的获取方式本质不同（详见 upstream.Profile.ModelsAPI）：
+//
+//	国内站（默认）：**实时**查询上游 `/console/enterprises/personal/models`，
+//	                带回积分倍率、思考档位、上下文与最大输出等真实元数据。
+//	                顺带刷新 client 的 effort 降级能力缓存。
+//	国际站：该上游路由未挂载（真实 token 实测裸 HTML 500），**只能给静态清单**
+//	        （internal/server 维护的实测表），故无积分倍率/思考档位元数据，
+//	        响应里以 source="static" 标注，面板据此隐藏空列并给出说明。
+//
+// `?region=cn|intl` 选择站点；缺省 = cn（保持既有行为不变）。
+// 国际站请求**不需要**池中有国内站账号，也不打上游——纯静态返回，永远可用。
+//
 // 无可用账号 503（先添加账号）；上游失败 502。
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
-	acct := p.cfg.Pool.Pick()
+	region := pool.NormalizeRegionFilter(r.URL.Query().Get("region"))
+	if region == pool.RegionFilterAny {
+		region = auth.RegionCN // 缺省国内站（既有行为）
+	}
+
+	// 国际站：上游无此接口，直接返回静态清单（不打网络）。
+	if !upstream.SupportsModelsAPI(region) {
+		ids := upstream.StaticModelIDsFor(region)
+		out := make([]map[string]any, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, map[string]any{
+				"id":               id,
+				"context_length":   131072,
+				"default_effort":   "",
+				"supported_efforts": []string{},
+			})
+		}
+		log.Printf("panel: 返回%s静态模型清单（该站无模型清单接口）共 %d 个", auth.RegionLabel(region), len(out))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"region":  region,
+			"source":  "static",
+			"models":  out,
+			"message": auth.RegionLabel(region) + "未提供模型清单接口，以下为该站实测可用模型（静态清单）",
+		})
+		return
+	}
+
+	// 国内站：实时查询。只在国内站账号中选号（区域过滤），避免混挂池下选错站点。
+	acct := p.cfg.Pool.PickInRegion(auth.RegionCN, nil, "")
 	if acct == nil {
-		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
+		total, _, _, _, _ := p.cfg.Pool.CountsDetailed()
+		if total == 0 {
+			writeErrRegion(w, http.StatusServiceUnavailable, region,
+				"没有可用账号：请先在面板添加账号再查询")
+			return
+		}
+		writeErrRegion(w, http.StatusServiceUnavailable, region,
+			"没有可用的国内站账号：模型清单接口仅国内站提供，请添加/解冻国内站账号后重试")
 		return
 	}
 	infos, err := p.cfg.Upstream.FetchModels(acct)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "fetch models: "+err.Error())
+		if errors.Is(err, upstream.ErrModelsUnsupported) {
+			writeErrRegion(w, http.StatusNotImplemented, region, modelsUnsupportedMsg(acct.Region()))
+			return
+		}
+		// 上游可能返回裸 HTML（网关层错误页），整段塞给前端既难看也无信息量。
+		// 这里归一为一句可读文案，原始错误只进日志（面板日志区可查）。
+		log.Printf("panel: 查询模型失败 uid=%s: %v", acct.UID, err)
+		writeErrRegion(w, http.StatusBadGateway, region,
+			"查询上游模型清单失败：" + upstreamErrHint(err) + "（详情见运行日志）")
 		return
 	}
 	out := make([]map[string]any, 0, len(infos))
@@ -236,7 +307,101 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			"credits":              mi.Credits,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"region": auth.RegionCN,
+		"source": "live",
+		"models": out,
+	})
+}
+
+// modelsUnsupportedMsg 站点不支持模型清单接口时的用户提示。
+//
+// 要点（按用户实际困惑排序）：
+//  1. 说清是**站点能力**而非故障；
+//  2. 说明**不影响对话**——并给出可操作替代：网关不按白名单校验 model，
+//     任意模型名都会原样透传上游（与 workbuddy-gateway 的说明一致），
+//     故"列不出来"不等于"不能用"；
+//  3. 给出获得清单的路径（国内站账号）。
+// upstreamErrHint 把上游错误压缩成一句人话，避免把裸 HTML 错误页透给用户。
+//
+// 上游网关（APISIX/EdgeOne）在鉴权/路由层失败时返回整页 HTML，
+// 直接塞进面板既占空间又没有有效信息。这里按状态码给出可操作的归因；
+// 源码里的原始错误仍完整打到运行日志，需要细节时去日志区看。
+func upstreamErrHint(err error) string {
+	var ue *upstream.Error
+	if errors.As(err, &ue) {
+		switch ue.Status {
+		case 401, 403:
+			return "账号凭证无效或已过期，请重新登录该账号"
+		case 429:
+			return "上游限流，请稍后重试"
+		}
+		if ue.Status >= 500 {
+			return "上游服务异常（HTTP " + strconv.Itoa(ue.Status) + "）"
+		}
+		return "上游返回 HTTP " + strconv.Itoa(ue.Status)
+	}
+	msg := err.Error()
+	// 未分类错误可能仍含 HTML 片段：截断到首行并限长。
+	if i := strings.IndexAny(msg, "\r\n<"); i > 0 {
+		msg = msg[:i]
+	}
+	if len(msg) > 120 {
+		msg = msg[:120] + "…"
+	}
+	return msg
+}
+
+func modelsUnsupportedMsg(region string) string {	return auth.RegionLabel(region) + "不提供模型清单接口（该控制台路由仅国内站提供，" +
+		"国际站实测返回裸 HTML 500）。对话不受影响：网关不校验模型白名单，" +
+		"任意 model 名都会原样透传上游，可直接填写已知模型名使用；" +
+		"如需在面板查看完整清单与思考档位，请添加国内站账号"
+}
+
+// ---------------------------------------------------------------------------
+// 站点（区域）
+// ---------------------------------------------------------------------------
+
+// regions 返回两个上游站点的 Profile 与池内分布。
+//
+// 面板「配置」页据此展示站点参数（便于用户核对域名/平台参数是否与上游实际一致），
+// 「添加账号」弹窗据此渲染站点选择；只读接口，参数不可在线改（站点域名属装配期事实，
+// 如需覆盖请编辑 config.json 的 regions 段并重启）。
+func (p *Panel) regions(w http.ResponseWriter, r *http.Request) {
+	profiles := upstream.AllProfiles()
+	out := make([]map[string]any, 0, len(profiles))
+	for _, pf := range profiles {
+		out = append(out, map[string]any{
+			"region":        pf.Key,
+			"label":         pf.Label,
+			"chat_base":     pf.ChatBase,
+			"billing_base":  pf.BillingBase,
+			"web_base":      pf.WebBase,
+			"origin":        pf.Origin,
+			"platform":      pf.Platform,
+			"user_agent":    pf.ClientUA,
+			"login_ttl_sec": int(pf.LoginTTL.Seconds()),
+			"growth":        pf.Growth,
+			"models_api":    pf.ModelsAPI,
+			// 国际化提示：国际站在浏览器内完成登录（邮箱/验证码/SSO），非扫码。
+			"login_hint": loginHintFor(pf.Key),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"regions": out,
+		"counts":  p.cfg.Pool.CountsByRegion(),
+		"known":   p.cfg.Pool.KnownRegions(),
+	})
+}
+
+// loginHintFor 返回站点的登录方式说明（面板展示给用户）。
+func loginHintFor(region string) string {
+	if auth.NormalizeRegion(region) == auth.RegionINTL {
+		return "在浏览器中完成登录（邮箱 / 验证码 / SSO 等），页面显示 Login Successful 即可"
+	}
+	return "使用微信 / 企业微信扫码登录"
 }
 
 // ---------------------------------------------------------------------------
@@ -269,11 +434,22 @@ func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 
 // accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），
 // 与 scheduler.RunCheckinNow 的单号语义一致。
+//
+// 站点分流（与 scheduler 同口径）：
+//   - 签到仅国内站（国际站 daily-checkin 返回 code=10001「签到活动未开启或已过期」，
+//     属常态），故国际站账号的签到请求直接 400 说明，不盲发；
+//   - **余额查询两站都做**（国际站计费域可用），所以这里不能因为"跳过签到"就整条返回，
+//     否则国际站账号连余额都无法通过这个按钮刷新。
 func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.cfg.Pool.AuthByUID(uid)
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	if !upstream.SupportsCheckin(a.Region()) {
+		writeErr(w, http.StatusBadRequest,
+			auth.RegionLabel(a.Region())+"未开启签到活动（该站无成长中心）；余额可点「余额」按钮刷新")
 		return
 	}
 	checkinMsg := ""
@@ -410,4 +586,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"ok": false, "error": msg})
+}
+
+// writeErrRegion 带 region 回显的错误响应。
+//
+// 模型页的请求/响应都以站点为轴：前端切换站点后若只收到错误、拿不到 region，
+// 就无法区分"当前这个站点的错误"与"上一个站点的迟到响应"（快速连点切换时
+// 尤其明显，会把国际站的错误显示在国内站标签下）。回显 region 让前端能
+// 丢弃过期响应。
+func writeErrRegion(w http.ResponseWriter, status int, region, msg string) {
+	writeJSON(w, status, map[string]any{"ok": false, "region": region, "error": msg})
 }

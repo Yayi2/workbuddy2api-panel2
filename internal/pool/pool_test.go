@@ -859,6 +859,45 @@ func TestCooldownSoftForModelParsedUntil(t *testing.T) {
 	}
 }
 
+// TestStatusExposesModelRateLimit 模型级 6004 冷却必须在 Status 上标注 model_rate_limit
+// 与触发模型名——这是面板把"限流冷却"细化为"限流冷却（glm-5.3）· 换模型可用"的唯一数据源。
+// 账号级软冷却（无模型）不得被标成模型级，否则面板会误导用户去切模型绕过一个绕不过的冷却。
+func TestStatusExposesModelRateLimit(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1", Nickname: "n1"})
+
+	// 1) 模型级 6004：标注模型名。
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(10*time.Minute), "glm-5.3", "6004")
+	st, ok := p.Status("u1")
+	if !ok || !st.Cooling {
+		t.Fatalf("want cooling: %+v ok=%v", st, ok)
+	}
+	if !st.ModelRateLimit || st.ModelRateModel != "glm-5.3" {
+		t.Errorf("model-level 6004: want (true, glm-5.3), got (%v, %q)",
+			st.ModelRateLimit, st.ModelRateModel)
+	}
+	if st.CoolRemaining <= 0 {
+		t.Errorf("CoolRemaining must be >0 for panel countdown, got %d", st.CoolRemaining)
+	}
+
+	// 2) 账号级软冷却（无模型）：不得标成模型级。
+	p2 := New("")
+	p2.Add(&auth.Auth{UID: "u2"})
+	p2.Cooldown("u2", CoolSoft, time.Minute, "429 rate limit")
+	st2, _ := p2.Status("u2")
+	if st2.ModelRateLimit || st2.ModelRateModel != "" {
+		t.Errorf("plain soft cooldown must not be model-level, got (%v, %q)",
+			st2.ModelRateLimit, st2.ModelRateModel)
+	}
+
+	// 3) 冷却到期后：不再报告任何冷却字段（面板显示"可用"）。
+	p.Revive("u1")
+	st3, _ := p.Status("u1")
+	if st3.Cooling || st3.ModelRateLimit || st3.ModelRateModel != "" {
+		t.Errorf("after revive: want no cooling/model flag, got %+v", st3)
+	}
+}
+
 func TestCooldownSoftForModelCappedBySoftRateMax(t *testing.T) {
 	// 解析时间超出 soft_rate_max → 截断到 soft_rate_max（不无限期拉黑）。
 	p := New("")

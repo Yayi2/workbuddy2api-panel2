@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
@@ -82,6 +83,18 @@ type Config struct {
 		UserAgent string `json:"user_agent"`
 	} `json:"upstream"`
 
+	// Regions 上游站点参数覆盖（全部留空 = 使用内置实测值，零配置可用）。
+	//
+	// 站点域名/平台参数属于"外部事实"：上游可能调整部署，而内置值来自实测快照。
+	// 保留覆盖能力，使这类变化无需改代码即可修正。
+	//
+	// 站点**身份与能力边界**（Key/Label/Growth）不在覆盖范围内——那是代码语义，
+	// 不是配置项（详见 internal/upstream/profile.go）。
+	Regions struct {
+		CN   RegionOverride `json:"cn"`
+		INTL RegionOverride `json:"intl"`
+	} `json:"regions"`
+
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
@@ -105,6 +118,12 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
+		// Strategy 选号策略（面板可在线切换，热生效）：
+		//   weighted（默认）= 三因子加权 Top5 + 加权随机，打散热点、避免额度集中；
+		//   priority        = 按面板排定的顺序取第一个可用账号（优先号不可用才用下一个）；
+		//   round_robin     = 按顺序轮流使用，均摊各号额度。
+		// 空值/未知一律回落 weighted —— 保证老 config 与既有部署行为逐字节不变。
+		Strategy           string  `json:"strategy"`
 		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
 		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
 		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
@@ -127,6 +146,19 @@ type Config struct {
 	SessionTTL             time.Duration `json:"-"`
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
+}
+
+// RegionOverride 单个上游站点的参数覆盖（空字段 = 用内置实测值）。
+//
+// 字段全部可选：只填想改的那一项，其余保持内置值（upstream.Profile.regionOverride
+// 逐字段判断非空才覆盖）。这样"只想换国际站域名"的用户不必抄全整段配置。
+type RegionOverride struct {
+	ChatBase    string `json:"chat_base"`    // 聊天/growth 域基址
+	BillingBase string `json:"billing_base"` // 计费/活动域基址
+	WebBase     string `json:"web_base"`     // Web 成长中心域
+	Origin      string `json:"origin"`       // Origin/Referer 伪装来源
+	Platform    string `json:"platform"`     // auth/state 的 platform 参数
+	UserAgent   string `json:"user_agent"`   // 该站点出站 UA
 }
 
 // Default 默认配置。
@@ -161,6 +193,7 @@ func Default() *Config {
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "custom" // 缺省 custom：网关自有提示词从源头消灭 system 指纹误报
 	c.Pool.MaxInFlight = 3
+	c.Pool.Strategy = "weighted" // 默认既有行为：三因子加权随机
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
 	c.Pool.BreakerCooldownMax = "6h"
@@ -302,6 +335,22 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PROMPT_FILE"); v != "" {
 		c.Prompt.File = v
 	}
+	// 国际站端点覆盖（上游部署调整时无需改代码；空 = 内置实测值）。
+	if v := os.Getenv("WB2A_INTL_CHAT_BASE"); v != "" {
+		c.Regions.INTL.ChatBase = v
+	}
+	if v := os.Getenv("WB2A_INTL_BILLING_BASE"); v != "" {
+		c.Regions.INTL.BillingBase = v
+	}
+	if v := os.Getenv("WB2A_INTL_WEB_BASE"); v != "" {
+		c.Regions.INTL.WebBase = v
+	}
+	if v := os.Getenv("WB2A_INTL_ORIGIN"); v != "" {
+		c.Regions.INTL.Origin = v
+	}
+	if v := os.Getenv("WB2A_INTL_PLATFORM"); v != "" {
+		c.Regions.INTL.Platform = v
+	}
 }
 
 func (c *Config) normalize() error {
@@ -342,6 +391,10 @@ func (c *Config) normalize() error {
 	if c.Pool.IdleWeightMax <= 0 {
 		c.Pool.IdleWeightMax = 5.0
 	}
+	// 选号策略：空/未知回落 weighted（老 config 无该键 → 行为不变）。
+	// 不在 normalize 里报错：策略是纯调优项，拼错时按默认跑比启动失败更合理，
+	// 但归一后的值会写回面板展示，用户能看出"我配的没生效"。
+	c.Pool.Strategy = pool.NormalizeStrategy(c.Pool.Strategy)
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
 	}

@@ -167,8 +167,90 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
 .tag.bad { background: var(--bad-soft); color: var(--bad); }
 .tag.mute { background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line); }
+/* 站点徽标：国内站/国际站配色区分（国际站用强调色，一眼可辨混挂池的成分） */
+.tag.cn { background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line); }
+.tag.intl { background: var(--accent-soft); color: var(--accent); border: 1px solid transparent; }
+/* 站点筛选条（账号池上方）：胶囊式切换，只展示池中实际存在的站点 */
+.rfilter {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 9px 15px; border-bottom: 1px solid var(--line-soft);
+}
+.rfilter .rf-lb { font-size: 12px; color: var(--ink-3); margin-right: 2px; }
+.rfilter .rf-sep { width: 1px; height: 14px; background: var(--line); margin: 0 4px; }
+button.rf { padding: 3px 11px; font-size: 12.5px; border-radius: 999px; }
+button.rf.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 550; }
+/* API 地址条：把网关的 /v1 入口直接摆在模型页，一键复制方便接客户端 */
+.apiurl {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 9px 15px; border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-2);
+}
+.apiurl code {
+  font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 6px; padding: 2px 8px; user-select: all;
+}
+/* 复制按钮的瞬时成功态：给一次视觉确认，避免"点了不知道成没成" */
+.copy-x.copied, button.copied { background: var(--ok-soft) !important; color: var(--ok) !important; border-color: var(--ok) !important; }
+/* 模型名列的复制按钮：默认淡显，悬停整行时浮现，避免表格过于花哨 */
+td.cp button { opacity: .55; transition: opacity .12s; }
+tr:hover td.cp button { opacity: 1; }
+/* 站点选择（添加账号弹窗）：单选卡片 */
+.rpick { display: flex; gap: 8px; margin-bottom: 12px; }
+.rpick label {
+  flex: 1; display: flex; flex-direction: column; gap: 3px; cursor: pointer;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2);
+}
+.rpick label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.rpick input { margin: 0 0 2px; accent-color: var(--accent); }
+.rpick .rn { font-size: 13px; font-weight: 550; }
+.rpick .rh { font-size: 11.5px; color: var(--ink-3); line-height: 1.45; }
 .acts { display: flex; gap: 5px; justify-content: flex-end; white-space: nowrap; }
 .acts button { padding: 3.5px 8px; font-size: 12.5px; white-space: nowrap; flex: none; }
+
+/* ── 使用顺序弹窗 ─────────────────────────────────────────────────── */
+.osec { margin-bottom: 18px; }
+.osec:last-child { margin-bottom: 0; }
+/* 策略选择卡片（与站点选择同风格） */
+.ostrat { display: flex; gap: 8px; }
+.ostrat label {
+  flex: 1; display: flex; flex-direction: column; gap: 3px; cursor: pointer;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2);
+}
+.ostrat label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.ostrat .sn { font-size: 13px; font-weight: 550; display: flex; align-items: center; gap: 6px; }
+.ostrat .sd { font-size: 11.5px; color: var(--ink-3); line-height: 1.45; }
+/* 顺序列表 */
+.olist { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow-y: auto; }
+.olist li {
+  display: flex; align-items: center; gap: 9px; padding: 8px 11px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2);
+  margin-bottom: 6px;
+}
+.olist li:last-child { margin-bottom: 0; }
+/* 拖拽柄：仅在按住它时才能拖动整行（避免行内选文本/点按钮误触拖拽） */
+.olist .grip {
+  cursor: grab; color: var(--ink-3); font-size: 15px; line-height: 1;
+  padding: 2px 2px; flex: none; user-select: none; letter-spacing: -1px;
+}
+.olist .grip:active { cursor: grabbing; }
+.olist li:hover .grip { color: var(--ink-2); }
+/* 拖动中的行：淡化 + 虚线边，明确"它正在被搬走" */
+.olist li.dragging { opacity: .45; border-style: dashed; }
+/* 落点指示线：插入到目标行的上半/下半 */
+.olist li.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.olist li.drop-after  { box-shadow: 0  2px 0 0 var(--accent); }
+.olist .rank {
+  font: 600 12.5px/1 var(--mono); color: var(--ink-3);
+  min-width: 20px; text-align: right;
+}
+.olist .oname { flex: 1; min-width: 0; }
+.olist .onm { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.olist .oid { font-family: var(--mono); font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.olist .oacts { display: flex; gap: 4px; flex: none; }
+.olist .oacts button { padding: 2.5px 7px; font-size: 12px; border-radius: 5px; }
+/* 生效中的优先号（策略为 priority 时的队首）加一条强调边 */
+.olist li.lead { border-color: var(--accent); }
 
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
 .empty .big { font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }
@@ -295,16 +377,25 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
+          <button class="xs" id="btnOrder" title="调整账号使用顺序 / 选号策略">使用顺序</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
           <button class="xs" id="btnKeepaliveAll">全部保活</button>
         </header>
+        <div class="rfilter" id="regionFilter" role="group" aria-label="按站点筛选">
+          <span class="rf-lb">站点</span>
+          <button class="rf on" data-r="all">全部</button>
+          <button class="rf" data-r="cn">国内站</button>
+          <button class="rf" data-r="intl">国际站</button>
+          <span class="rf-sep" aria-hidden="true"></span>
+          <span class="note" id="rfNote"></span>
+        </div>
         <div class="tbl-wrap">
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
-            <th>账号</th><th>状态</th><th>积分</th>
+            <th>账号</th><th>站点</th><th>状态</th><th>积分</th>
             <th>成功 / 失败</th><th>在途</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
@@ -322,9 +413,31 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="mdNote">实时查询上游</span>
           <button class="xs" id="btnModels">重新获取</button>
         </header>
+        <div class="rfilter" id="mdFilter" role="group" aria-label="按站点切换模型清单">
+          <span class="rf-lb">站点</span>
+          <button class="rf" data-mr="cn">国内站</button>
+          <button class="rf" data-mr="intl">国际站</button>
+          <span class="rf-sep" aria-hidden="true"></span>
+          <span class="note" id="mdSrcNote"></span>
+          <span class="grow"></span>
+          <button class="xs" id="btnCopyAllModels" title="复制当前站点全部模型名（每行一个）">复制全部模型名</button>
+        </div>
+
+        <div class="apiurl">
+          <span class="rf-lb">API 地址</span>
+          <code id="apiBase">/v1</code>
+          <button class="xs" data-copy="apiBase" title="复制 API 基础地址">复制</button>
+          <span class="rf-sep" aria-hidden="true"></span>
+          <code id="apiChat">/v1/chat/completions</code>
+          <button class="xs" data-copy="apiChat" title="复制 Chat 接口地址">复制</button>
+          <span class="rf-sep" aria-hidden="true"></span>
+          <code id="apiModels">/v1/models</code>
+          <button class="xs" data-copy="apiModels" title="复制 Models 接口地址">复制</button>
+        </div>
+
         <div class="tbl-wrap">
         <table class="acc md">
-          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th><th class="c-acts">复制</th></tr></thead>
           <tbody id="mdBody"></tbody>
         </table>
         </div>
@@ -343,8 +456,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">改动需重启进程</span></label>
               <label class="fld"><span class="lb">API 密钥</span>
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
-                <button type="button" class="xs" id="btnEye">显示</button></div>
-                <span class="hint">立即生效（含面板自身）</span></label>
+                <button type="button" class="xs" id="btnEye">显示</button>
+                <button type="button" class="xs" id="btnCopyKey" title="复制当前的 API 密钥">复制</button></div>
+                <span class="hint">立即生效（含面板自身）。复制按钮取输入框里的实际值（未保存的修改也会被复制）。</span></label>
             </div>
           </div>
         </div>
@@ -467,6 +581,29 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <input type="checkbox" name="session_sticky_enabled"></div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>
           </div>
+
+          <div class="box" style="margin-top:14px">
+            <header><h3>上游站点</h3><span class="grow"></span>
+              <span class="note">两个站点同协议异构部署，账号按凭据 edition 自动路由</span></header>
+            <div class="tbl-wrap">
+              <table class="acc md">
+                <thead><tr>
+                  <th class="mark" aria-hidden="true"></th>
+                  <th>站点</th><th>上游域名</th><th>登录方式</th><th>登录 platform</th><th>成长中心</th><th>模型清单</th><th>账号数</th>
+                </tr></thead>
+                <tbody id="rgBody"><tr><td colspan="8"><div class="empty">加载中…</div></td></tr></tbody>
+              </table>
+            </div>
+            <div class="hint" style="padding:10px 15px">
+              需要覆盖域名/平台参数时，在 config.json 增加 <code>regions.cn</code> / <code>regions.intl</code>
+              段（chat_base / billing_base / web_base / origin / platform / user_agent），保存后需重启生效。
+              国际站账号使用 <code>workbuddy-intl-&lt;uid&gt;.json</code> 命名，与
+              <a href="https://github.com/CangShui/workbuddy-gateway" target="_blank" rel="noopener noreferrer">workbuddy-gateway</a>
+              的凭据文件可直接互通。
+              国际站未挂载模型清单路由（实测裸 HTML 500），故模型页固定使用国内站账号；
+              对话、余额与保活不受影响。
+            </div>
+          </div>
         </div>
 
         <div class="savebar">
@@ -519,17 +656,67 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
-<!-- 添加账号 -->
-<div class="veil" id="addVeil">
-  <div class="dlg">
+<!-- 使用顺序 -->
+<div class="veil" id="orderVeil">
+  <div class="dlg" style="width:760px">
     <header>
-      <h3>添加账号</h3>
-      <div class="hint">浏览器完成腾讯账号登录，网关自动接续签到并载入账号池，无需重启。</div>
+      <h3>账号池使用顺序</h3>
+      <div class="hint">排在前面的账号优先被选用。仅在「手动优先级 / 轮流使用」策略下影响选号；
+        「加权随机」（默认）会打散热点、不按顺序。<br>
+        <b>注意</b>：已建立的<b>会话粘性绑定优先级更高</b>——同一会话的多轮对话会固定在首次成功
+        的那个账号上（保证上下文连续），不受此顺序影响。想验证顺序是否生效，请换一个新会话，
+        或临时关闭会话粘性。</div>
     </header>
     <div class="body">
-      <div id="addLoad" class="state"><span class="dots">正在获取授权链接</span></div>
+      <div class="osec">
+        <div class="state" style="margin-bottom:7px">选号策略</div>
+        <div class="ostrat" id="orderStrategy"></div>
+        <div class="state" id="orderStratNote" style="font-size:12.5px;color:var(--ink-3);margin-top:7px"></div>
+      </div>
+      <div class="osec">
+        <div class="state" style="margin-bottom:7px">
+          使用顺序
+          <span style="color:var(--ink-3);font-size:12.5px">（自上而下依次优先 · 可拖动左侧 ⠿ 手柄排序，或用 ↑ ↓ 置顶）</span>
+        </div>
+        <div class="state" id="orderState"><span class="dots">加载中</span></div>
+        <ol class="olist" id="orderList" hidden></ol>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnOrderReset" title="恢复为默认顺序（按账号 ID 升序）">恢复默认顺序</button>
+      <button id="btnOrderReload">重新加载</button>
+      <button class="primary" id="btnCloseOrder">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 添加账号 -->
+<div class="veil" id="addVeil">
+  <div class="dlg" style="width:520px">
+    <header>
+      <h3>添加账号</h3>
+      <div class="hint">在浏览器完成账号登录，网关自动接续签到并载入账号池，无需重启。</div>
+    </header>
+    <div class="body">
+      <div id="addPick">
+        <div class="state" style="margin-bottom:8px">选择账号所属站点：</div>
+        <div class="rpick">
+          <label>
+            <input type="radio" name="addRegion" value="cn" checked>
+            <span class="rn">国内站 · codebuddy</span>
+            <span class="rh">copilot.tencent.com — 微信 / 企业微信扫码登录，含成长中心（签到 / 任务 / 旅行）</span>
+          </label>
+          <label>
+            <input type="radio" name="addRegion" value="intl">
+            <span class="rn">国际站 · workbuddy.ai</span>
+            <span class="rh">www.workbuddy.ai — 浏览器内登录（邮箱 / 验证码 / SSO），无成长中心</span>
+          </label>
+        </div>
+      </div>
+      <div id="addLoad" class="state" hidden><span class="dots">正在获取授权链接</span></div>
       <div id="addReady" hidden>
-        <div class="state">在浏览器打开以下链接并登录：</div>
+        <div class="state" id="addHint">在浏览器打开以下链接并登录：</div>
         <div class="url" id="addUrl"></div>
         <div class="state" id="addPoll"><span class="dots">等待授权完成，自动检测中</span></div>
       </div>
@@ -539,6 +726,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="grow"></span>
       <button id="btnCopyUrl" hidden>复制链接</button>
+      <button id="btnStartLogin" class="primary" hidden>获取授权链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>
     </footer>

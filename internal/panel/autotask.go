@@ -200,6 +200,10 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	// 国际站账号无成长中心：在动作分发前拦截，避免逐个动作去撞必然 404 的端点。
+	if !p.requireGrowth(w, a) {
+		return
+	}
 	var body struct {
 		TaskCode string `json:"task_code"`
 	}
@@ -765,6 +769,9 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if !p.requireGrowth(w, a) {
 		return
 	}
 	// per-account 互斥（与单任务动作共用一把锁）：重复点击 409。

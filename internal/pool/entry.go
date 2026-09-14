@@ -30,12 +30,20 @@ type Status struct {
 	UID             string    `json:"uid"`
 	Nickname        string    `json:"nickname,omitempty"`
 	Credits         int64     `json:"credits"`
+	// Region 账号所属站点（"cn" 国内站 / "intl" 国际站），源自凭据文件 edition 字段。
+	Region          string    `json:"region"`
+	RegionLabel     string    `json:"region_label"`      // "国内站" / "国际站"（面板直接展示）
+	RegionGrowth    bool      `json:"region_growth"`     // 该站点是否有成长中心（国际站 false → 任务/旅行 N/A）
 	Cooling         bool      `json:"cooling"`
 	CoolKind        string    `json:"cool_kind,omitempty"`
 	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
 	Until           time.Time `json:"until,omitempty"`
 	Reason          string    `json:"reason,omitempty"`
 	SoftStreak      int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
+	// ModelRateLimit 报告本次冷却是否为「模型级 6004 限流」以及被限的模型名。
+	// 面板据此把"限流冷却"细化为"模型限流 · glm-5.2"，并提示切模型即可用。
+	ModelRateLimit  bool      `json:"model_rate_limit,omitempty"`
+	ModelRateModel  string    `json:"model_rate_model,omitempty"`
 	Disabled        bool      `json:"disabled"`
 	DisabledReason  string    `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	SuccessCount    int64     `json:"success_count,omitempty"`
@@ -159,6 +167,10 @@ type stateAccount struct {
 // stateFile 持久化格式。
 type stateFile struct {
 	Accounts map[string]stateAccount `json:"accounts"`
+	// Order 账号优先级顺序（uid 列表，靠前者优先），供 priority / round_robin 策略使用。
+	// 与账号状态同文件、同一次原子落盘：顺序是用户的显式配置，不应另存一处而可能失配。
+	// 缺字段（老 state.json）→ nil → 按 uid 升序（确定性默认，不随机）。
+	Order []string `json:"order,omitempty"`
 }
 
 // flushInterval 后台落盘周期。

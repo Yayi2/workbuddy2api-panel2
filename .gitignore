@@ -20,6 +20,14 @@ config.json
 *.tmp
 __pycache__/
 
+# 构建产物与缓存（本仓库约定：编译输出全部走项目外的 .build-workbuddy2api/，
+# 由 build.ps1 管理）。以下条目兜底覆盖手工编译时可能落在项目内的产物，
+# 确保它们永远不会被误提交，也提醒协作者不要在项目内放二进制。
+/.gocache/
+/.gomodcache/
+/wb2api.exe
+/dist/
+
 # Backups (contains auth tokens)
 backups/
 

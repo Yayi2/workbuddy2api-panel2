@@ -9,21 +9,16 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
-// RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。
+// RunBlackcatNow 对所有**支持成长中心**的账号执行夜猫子对话补足（窗口外跳过）。
 // 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验 InNightWindow。
+// 国际站无 black_cat 任务（其任务清单是另一套 schema），由 growthAccounts 过滤，
+// 否则每个夜间窗口都会对国际站账号白跑一次任务查询。
 func (s *Scheduler) RunBlackcatNow() {
 	if !upstream.InNightWindow(time.Now()) {
 		log.Printf("blackcat: 当前不在 23:00–08:00 计数窗口，跳过")
 		return
 	}
-	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
-			continue
-		}
-		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.AccessToken == "" {
-			continue
-		}
+	for _, a := range s.growthAccounts(true) {
 		need, err := s.cfg.Upstream.BlackcatNeed(a)
 		if err != nil {
 			log.Printf("blackcat %s: %v", a.UID, err)

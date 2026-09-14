@@ -149,6 +149,9 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"healthy": healthy,
 		"total":   total,
 		"service": ServiceName,
+		// 按站点分组的可用数：混挂部署下，探活方据此判断某一站点是否整体不可用
+		// （总 healthy>0 但某站点为 0 时，该站点的区域收窄请求会全部 503）。
+		"regions": h.cfg.Pool.CountsByRegion(),
 	})
 }
 
@@ -171,21 +174,24 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"in_flight_full":  inFlightFull,
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// 按站点（国内站/国际站）分组计数：面板与运维据此观察两站混挂的健康度。
+		"regions": h.cfg.Pool.CountsByRegion(),
 	})
 }
 
-// 静态 CN 模型表（api-reference §5，动态接口失败时的回退）。
-var staticModels = []map[string]any{
-	{"id": "glm-5.2", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "glm-5.1", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "glm-5v-turbo", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "kimi-k2.7", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "minimax-m3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "hy3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "hy3-preview", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "hy3-preview-agent", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "deepseek-v4-pro", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+// 静态模型表已统一收敛到 upstream（按站点），使路由层 /v1/models 与面板
+// 「模型与档位」共用同一份清单，避免两处各维护一份而漂移。
+// 这两个包级别名保留既有调用点的可读性。
+
+// staticModels 国内站静态模型表（api-reference §5，动态接口失败时的回退）。
+var staticModels = upstream.StaticModelsCN
+
+// intlStaticModels 国际站静态模型表（实测所得；国际站无模型清单接口）。
+var intlStaticModels = upstream.StaticModelsINTL
+
+// ModelIDsFor 返回指定站点的模型 id 列表（顺序即展示顺序）。
+func ModelIDsFor(region string) []string {
+	return upstream.StaticModelIDsFor(region)
 }
 
 // dynamicModelsCache 动态模型缓存。
@@ -212,6 +218,15 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length 与 reasoning 档位）。
 // supported_efforts/default_effort 透出上游实际能力（客户端据此渲染思考档位选择）；
 // 未知（静态回退表 / 上游未返回）时省略字段，客户端按自身默认处理。
+//
+// 回退顺序（池成分决定）：
+//  1. 动态拉取（需国内站账号）；
+//  2. 无国内站账号 → 按池中实际站点给**对应站点**的静态表：
+//     只有国际站账号时用 intlStaticModels（国际站无模型清单接口，见其注释），
+//     否则用国内站静态表 staticModels。
+//
+// 这样客户端在纯国际站部署下也能拿到一份**与上游实际可用性一致**的模型清单，
+// 而不是误拿到含 deepseek-* 的国内站清单（那在国际站会 11102 调用失败）。
 func (h *Handler) modelList() []map[string]any {
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
 		out := make([]map[string]any, 0, len(infos))
@@ -247,11 +262,46 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		return out
 	}
-	return staticModels
+	return h.staticModelsForPool()
+}
+
+// staticModelsForPool 按池中实际站点返回对应的静态模型表（OpenAI 格式）。
+//
+// 纯国际站部署（无任何可用国内站账号）时返回国际站清单——避免把含
+// `deepseek-v4-pro` 的国内站清单发给国际站客户端（那在国际站返回 11102 不可用）。
+// 混挂或纯国内站时返回国内站清单（国内站可用模型，且是国际站的超集）。
+func (h *Handler) staticModelsForPool() []map[string]any {
+	region := auth.RegionCN
+	if len(h.cfg.Pool.AvailableUIDsInRegion(auth.RegionCN)) == 0 &&
+		len(h.cfg.Pool.AvailableUIDsInRegion(auth.RegionINTL)) > 0 {
+		region = auth.RegionINTL
+	}
+	src := upstream.StaticModelsFor(region)
+	out := make([]map[string]any, 0, len(src))
+	for _, m := range src {
+		cw := m.ContextWindow
+		if cw == 0 {
+			cw = 131072
+		}
+		out = append(out, map[string]any{
+			"id":             m.ID,
+			"object":         "model",
+			"created":        1753600000,
+			"owned_by":       "workbuddy",
+			"context_length": cw,
+		})
+	}
+	return out
 }
 
 // fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
 // 拉取失败记录时间戳进入 5min 负缓存，冷却期内直接用静态表，避免反复打上游。
+//
+// 站点约束：模型清单接口只在国内站提供（国际站未挂载该路由，实测返回裸 HTML 500）。
+// 故这里**只挑国内站账号**——随机 Pick 会在混挂池下约一半概率选中国际站账号，
+// 使动态模型列表长期拉不到、只能退化为静态表（且白白消耗一次上游请求
+// 并把"站点不支持"错误记成该账号的一次失败，污染成功率权重）。
+// 池中无国内站账号时直接返回 nil（走静态表），不产生失败负缓存。
 func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	dynamicModelsCache.RLock()
 	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
@@ -266,14 +316,20 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	}
 	dynamicModelsCache.RUnlock()
 
-	acct := h.cfg.Pool.Pick()
+	acct := h.cfg.Pool.PickInRegion(auth.RegionCN, nil, "")
 	if acct == nil {
+		// 无可用国内站账号：静态表兜底，且**不记失败负缓存**——这不是上游故障，
+		// 一旦用户添加或解冻国内站账号，应立即恢复动态拉取，不该被 5 分钟冷却挡住。
 		return nil
 	}
 	infos, err := h.cfg.Upstream.FetchModels(acct)
 	if err != nil || len(infos) == 0 {
 		// 拉取失败惩罚该账号，避免下次 Pick 又选中同一个反复失败；lastFail 保持全局负缓存。
-		h.cfg.Pool.NoteError(acct.UID)
+		// 站点不支持（ErrModelsUnsupported）不该罚号——那是站点能力边界，非账号问题；
+		// 且上面的区域过滤已保证不会选到该站点账号，此处仅作防御。
+		if !errors.Is(err, upstream.ErrModelsUnsupported) {
+			h.cfg.Pool.NoteError(acct.UID)
+		}
 		dynamicModelsCache.Lock()
 		dynamicModelsCache.lastFail = time.Now()
 		dynamicModelsCache.Unlock()
@@ -308,6 +364,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// 区域意图：X-WB-Region 头 或 model 后缀 "模型名@intl"（后者便于无自定义头
+	// 能力的 OpenAI SDK）。未指定 = 不限区域，走全池混挂轮询（默认行为不变）。
+	// bareModel 是剥离后缀后的模型名——上游不认识 @region，必须剥离后再透传。
+	reqRegion, bareModel := requestRegion(r.Header.Get(HeaderRegion), peek.Model)
+	if reqRegion != "" {
+		w.Header().Set(HeaderRegionApplied, reqRegion)
+		log.Printf("chat region=%s（区域收窄）", reqRegion)
+	}
+	// 把剥离后的模型名写回请求体：上游按 model 字段选模型，带后缀会命中不存在的模型。
+	if bareModel != peek.Model {
+		if rewritten, err := rewriteModelField(body, bareModel); err == nil {
+			body = rewritten
+			peek.Model = bareModel
+		} else {
+			log.Printf("chat region=%s: rewrite model field failed: %v（回退原始模型名）", reqRegion, err)
+		}
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
@@ -382,10 +456,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知选号：请求携带 model 时启用 6004 模型级冷却豁免
 			// （PickExcludingForModel 内部当 model 为空时即退化为 PickExcluding）。
-			acct = h.cfg.Pool.PickExcludingForModel(tried, peek.Model)
+			// 指定区域时收窄候选集（含兜底都不跨站点）。
+			acct = h.pickForRequest(reqRegion, tried, peek.Model)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
+			// 区域收窄无候选：给出可区分的错误，避免调用方误判为"网关全挂了"。
+			if reqRegion != "" && len(tried) == 0 {
+				writeRegionUnavailable(w, reqRegion)
+				return
+			}
 			break
 		}
 		st.uid = acct.UID

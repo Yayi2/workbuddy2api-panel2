@@ -26,7 +26,11 @@ type Auth struct {
 	UID          string
 	EnterpriseID string
 	Nickname     string
-	FilePath     string // 来源文件；refresh 后原子写回此处
+	// Edition 站点标识（"cn" 国内站 / "intl" 国际站），来自凭据文件顶层 edition 字段。
+	// 与 CangShui/workbuddy-gateway 同字段名同取值，两个项目的 auths/ 可直接互通。
+	// 老文件无此字段 → 零值 → 经 Region() 归一为 cn（历史 CN 账号），行为不变。
+	Edition string
+	FilePath string // 来源文件；refresh 后原子写回此处
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -56,6 +60,11 @@ func Parse(raw []byte) (*Auth, error) {
 		return nil, fmt.Errorf("storage_parse_error: %w", err)
 	}
 	var a Auth
+	// edition 与 auth/account 同层级（文档根），两种磁盘形态都从这里取——
+	// 与 workbuddy-gateway 的 StoredAuth.Edition 同一位置，保证凭据互通。
+	if raw, ok := probe["edition"]; ok {
+		_ = json.Unmarshal(raw, &a.Edition)
+	}
 	if _, nested := probe["auth"]; nested {
 		var n struct {
 			Auth struct {
@@ -81,6 +90,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
+			Edition:      a.Edition, // 文档根 edition（上行已取）
 		}
 	} else {
 		var f struct {
@@ -103,6 +113,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          f.UID,
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
+			Edition:      a.Edition, // 文档根 edition（上行已取）
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -135,6 +146,10 @@ func (a *Auth) SaveAtomic() error {
 			"enterpriseId": a.EnterpriseID,
 			"nickname":     a.Nickname,
 		},
+		// edition 恒写回（归一为 cn/intl）：refresh 后重写的文件仍能被
+		// workbuddy-gateway 正确识别站点，不会因本网关的写回而"丢失站点归属"
+		// 被国际站账号误路由到国内站。缺失时补 cn，与 Region() 的默认口径一致。
+		"edition": a.Region(),
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

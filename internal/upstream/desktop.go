@@ -276,7 +276,9 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.WebBaseCN+"/v2/report", bytes.NewReader(raw))
+	// web 域按账号站点取（国内站 workbuddy.cn / 国际站 workbuddy.ai），Origin 必须同站。
+	web := c.webBase(a)
+	req, err := http.NewRequest(http.MethodPost, web+"/v2/report", bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -284,7 +286,7 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", c.WebBaseCN)
+	req.Header.Set("Origin", web)
 	req.Header.Set("Referer", pageURL)
 	req.Header.Set("User-Agent", ua)
 	if a.UID != "" {

@@ -37,10 +37,11 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 能力 | 说明 |
 |---|---|
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
-| 🔄 **多账号池** | 三因子加权随机选号（积分占比 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群 |
+| 🔄 **多账号池** | 三因子加权随机选号（积分占比 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群；**可切换手动优先级 / 轮流使用**，见 [选号策略与使用顺序](#-选号策略与使用顺序) |
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
+| 🌏 **双站点（国内站 / 国际站）** | 同一套 `/v2/plugin/*` 协议的两套部署**混挂同一账号池**：国内站 `copilot.tencent.com`、国际站 `www.workbuddy.ai`；凭据按 `edition` 字段自动路由域名与指纹，面板可分区筛选、按站点登录（见 [国际版账号](#-国际版账号workbuddyai)） |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
 | 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
@@ -92,6 +93,173 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
 
+## 🌏 国际版账号（workbuddy.ai）
+
+除国内站（`copilot.tencent.com`）外，本网关支持 **WorkBuddy 国际站（`www.workbuddy.ai`）** 账号，两类账号**混挂同一账号池**轮询使用。
+
+### 为什么能混挂：同一套协议的两套部署
+
+国际站与国内站走**完全相同的 `/v2/plugin/*` 协议**（`auth/state`、`auth/token`、`login/account`、`auth/token/refresh`、`chat/completions` 的路径与响应包络一致），差异只有四处：
+
+| 项 | 国内站 | 国际站 |
+|---|---|---|
+| 上游域名 | `copilot.tencent.com` | `www.workbuddy.ai` |
+| Web Origin | `www.codebuddy.cn` | `www.workbuddy.ai` |
+| 登录 platform | `VSCode` | `workbuddy-ai` |
+| 登录方式 | 微信 / 企业微信**扫码** | **浏览器内**登录（邮箱 / 验证码 / SSO），等待窗口 15 分钟 |
+
+因此本网关不为国际站另建一套端点体系，而是把域名/Origin/UA 收敛为**按账号站点选择 Profile**（`internal/upstream/profile.go`），所有既有调用点自动跟随。
+
+> 判据来自 [CangShui/workbuddy-gateway](https://github.com/CangShui/workbuddy-gateway) 的实测实现；本网关已与其对齐并在真实上游验证（见下文「验证」）。
+
+### 凭据格式互通
+
+站点标识存放于凭据文件**顶层 `edition` 字段**（`"cn"` / `"intl"`），字段名与取值与 workbuddy-gateway 一致，**两个项目的 `auths/` 目录可直接互相加载**：
+
+```json
+{
+  "auth":    { "accessToken": "...", "refreshToken": "...", "expiresAt": 1799999999, "domain": "www.workbuddy.ai" },
+  "account": { "uid": "...", "enterpriseId": "...", "nickname": "..." },
+  "edition": "intl"
+}
+```
+
+- 国际站账号由面板登录后落盘为 `workbuddy-intl-<uid>.json`（国内站保持既有 `workbuddy-<uid>.json`）；
+- **无 `edition` 字段的老凭据**自动视为国内站，行为与升级前完全一致（向后兼容）；
+- token 自动刷新后的原子写回会**保留并补写 `edition`**，不会因刷新而丢失站点归属。
+
+### 添加国际版账号
+
+面板右上角「**添加账号**」→ 选择站点卡片「**国际站 · workbuddy.ai**」→ 「获取授权链接」→ 在浏览器完成登录（页面显示 *Login Successful* 即可）→ 网关自动轮询取回凭证、落盘并**热加载进池（无需重启）**。
+
+命令行等价做法（使用 workbuddy-gateway 的 CLI 登录亦可，凭据文件可直接被本网关加载）：
+
+```bash
+workbuddy-gateway login -intl -auth ./auths/workbuddy-intl.json
+```
+
+### 面板上的区域区分
+
+- **账号池表格**新增「站点」列（国内站 / 国际站徽标）；
+- 表头下方**站点筛选条**（全部 / 国内站 / 国际站），只展示池中实际存在的站点，并附带「可用/总数」汇总；
+- 国际站账号的**签到 / 任务 / 旅行按钮自动置灰**并标注原因（鼠标悬停可见）——成长中心（积分任务、连登、猫猫旅行）是国内站运营活动，国际站不提供，网关在服务端也会以 400 明确拒绝，避免对着必然 404 的端点盲发请求；
+- 「配置」页新增**上游站点**表，直出两站的域名 / 登录方式 / platform / 成长中心支持情况与各自账号数，便于核对路由参数。
+
+### 调用侧：按站点收窄请求（可选）
+
+默认**混挂全池轮询**（与引入本特性前行为一致）。需要把请求限定到某个站点时：
+
+```bash
+# 方式一：请求头
+curl -s http://localhost:7863/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "X-WB-Region: intl" \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}'
+
+# 方式二：model 后缀（便于无自定义头能力的 OpenAI SDK）
+-d '{"model":"glm-5.2@intl", ...}'
+```
+
+- 收窄生效时响应带 `X-WB-Region-Applied: intl` 头；未指定则不带该头；
+- 目标站点无可用账号时返回 **503 `no_available_account_in_region`**（与「全池不可用」可区分），**不会跨站点回落**——避免把请求发到调用方未预期的计费主体；
+- 无法识别的区域取值按「不限」处理，不会静默收窄成国内站。
+
+站点参数如需覆盖（上游变更时无需改代码），在 `config.json` 增加：
+
+```json
+"regions": {
+  "intl": { "chat_base": "https://www.workbuddy.ai", "platform": "workbuddy-ai" }
+}
+```
+
+留空的字段一律使用内置实测值。对应环境变量：`WB2A_INTL_CHAT_BASE` / `WB2A_INTL_BILLING_BASE` / `WB2A_INTL_WEB_BASE` / `WB2A_INTL_ORIGIN` / `WB2A_INTL_PLATFORM`。
+
+### 能力边界
+
+| 能力 | 国内站 | 国际站 |
+|---|---|---|
+| `/v1/chat/completions` 对话 | ✅ | ✅ |
+| Token 刷新 / 保活 | ✅ | ✅ |
+| 余额查询 | ✅ | ✅ |
+| 模型清单（控制台接口） | ✅ | ❌ 该路由仅国内站挂载 |
+| 签到 / 连登 / 旅行 / 积分任务 | ✅ | ❌ 无成长中心（面板置灰并说明） |
+
+> **关于国际站模型清单**（2026-09 用**两个真实有效 token** 实测，非无效 token 推断）：
+>
+> | 请求（国际站，有效 token） | 结果 |
+> |---|---|
+> | `GET /console/enterprises/personal/models` | `500` 裸 HTML（与国内站完全相同的 URL，该站未挂载） |
+> | `GET /v2/plugin/login/account` | `200` + 账号数据（证明 token 有效） |
+> | `POST /v2/chat/completions` | 业务包络 `code=11128`（后端可达、鉴权已通过） |
+> | `GET /console/enterprise/personal/models`（单数） | `403 not_authorized` |
+>
+> **判据辨析（避免误判）**：单数路径的 `403` **不能**当作"路由存在但无权限"的证据——
+> 整个 `/console/enterprise/` 前缀（含刻意编造的不存在路径）在无有效鉴权时都返回
+> `401/403`，属网关级前缀兜底。真正的判据是**复数**路径返回 500 裸 HTML，
+> 且同一 token 在协议族端点上一切正常。另经 JWT claims 核对：该 token 为 Keycloak
+> `azp: console`，scope 仅 `openid profile offline_access email`，本就不含控制台 API 角色。
+>
+> 因此本网关：
+> - 面板「模型与档位」与 `/v1/models` 的动态拉取**固定使用国内站账号**。早期实现用全池随机
+>   选号，混挂池下约一半概率命中该路由缺失的国际站账号，导致模型页整体报 500；
+> - 池中无可用国内站账号时：面板给出「请添加/解冻国内站账号」的可操作提示并说明
+>   *模型名可自行填写、网关不校验白名单*；`/v1/models` **按池中实际站点**回退对应静态表
+>   （纯国际站部署返回**国际站命名**的清单 `deepseek-v4.1-flash` / `deepseek-v3` 等，
+>   而非国内站的 `deepseek-v4-pro` / `deepseek-v4-flash`），仍返回 200；
+> - 显式 `?region=intl` 查询模型返回 **501** 并说明原因（是站点能力边界，不是故障）；
+> - **国际站账号的对话、余额、保活完全不受影响**（实测国际站真实对话流式返回正常）。
+>
+> 站点能力位（`growth` / `models_api`）在面板「配置 → 上游站点」表中直出，便于核对。
+
+### 国际站实测可用模型
+
+国际站无模型清单接口，下表为**逐个模型真实调用探测**的结果（2026-09）：
+
+| 模型 | 国际站 | 国内站 |
+|---|---|---|
+| `deepseek-v4.1-flash` | ✅ | — |
+| `deepseek-v3` | ✅ | — |
+| `deepseek-v4-pro` · `deepseek-v4-flash` | ❌ | ✅ |
+| `glm-5.2` · `glm-5.1` · `glm-5v-turbo` | ✅ | ✅ |
+| `kimi-k2.7` · `minimax-m3` · `hy3` | ✅ | ✅ |
+| `hy4-preview` | ✅ | — |
+| `hy3-preview` · `hy3-preview-agent` | — | ✅ |
+
+> ⚠️ **两站的 deepseek 命名不同**，这是最容易踩的坑：
+> 国际站用 `deepseek-v4.1-flash`（带小版本号），国内站用 `deepseek-v4-pro` / `deepseek-v4-flash`。
+> 把国内站的模型名发到国际站会得到 `code=11102 model [...] service info not found`。
+> （本项目早期就曾照搬国内站命名探测国际站、全部 11102，因而误判"国际站无 deepseek 系"——
+> 实际用户一直在用 `deepseek-v4.1-flash`。）
+>
+> 网关**不校验 model 白名单**：任意模型名都会原样透传上游（与 workbuddy-gateway 的
+> 「完全透传」策略一致），故"列不出来"不等于"不能用"；上表仅用于 `/v1/models`
+> 的静态回退与选型参考，两站的静态表由 `models_api` 能力位区分。
+
+### 验证
+
+已对**真实上游**完成端到端验证（非 mock）：
+
+```bash
+# 国内站登录 → copilot.tencent.com，platform=VSCode，等待 300s
+curl -sX POST -H "Authorization: Bearer $KEY" \
+  'http://127.0.0.1:7863/panel/api/login/start?region=cn'
+# {"region":"cn","region_label":"国内站","login_ttl_sec":300,
+#  "url":"https://copilot.tencent.com/login?platform=VSCode&state=..."}
+
+# 国际站登录 → www.workbuddy.ai，platform=workbuddy-ai，等待 900s
+curl -sX POST -H "Authorization: Bearer $KEY" \
+  'http://127.0.0.1:7863/panel/api/login/start?region=intl'
+# {"region":"intl","region_label":"国际站","login_ttl_sec":900,
+#  "url":"https://www.workbuddy.ai/login?platform=workbuddy-ai&state=..."}
+```
+
+启动日志会打印站点分布，可据此确认国际站凭据已被正确识别：
+
+```
+loaded 2 account(s) from ./auths
+账号站点分布：国内站 1，国际站 1
+```
+
 ## 🆚 与上游的差异
 
 本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
@@ -101,6 +269,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 能力 | 说明 |
 |---|---|
 | **Web 管理面板** | `internal/panel`，前端 go:embed 单文件进二进制，零外部依赖。账号池可视化（健康色条 / 积分量条 / 冷却倒计时）、单号运维、批量任务、日志查看、明暗主题 |
+| **国际版账号支持** | 国内站 / 国际站（`www.workbuddy.ai`）账号混挂同一池：凭据 `edition` 字段自动路由域名与指纹，面板按站点登录、分区筛选、能力置灰；`X-WB-Region` / `model@intl` 可按站点收窄请求。详见 [国际版账号](#-国际版账号workbuddyai) |
 | **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）**，替代命令行 `login.sh` 流程 |
 | **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
 | **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **17 个任务**（对话 / 领养 / 桌面行为链 / 模板 / 灵感案例 / 画布 / 专家召唤 / 技能尝鲜 / 主题 / 资料库 / 夜猫子等），推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
@@ -140,11 +309,14 @@ flowchart LR
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
     end
 
-    P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
+    P -. "读凭证 (0600)" .-> AUTH[("auths/*.json\nedition: cn | intl")]
     P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
-    U -->|"chat/completions (SSE)"| CB["CodeBuddy\ncopilot.tencent.com"]
+    U -->|"chat/completions (SSE)"| CB["国内站\ncopilot.tencent.com"]
+    U -->|"chat/completions (SSE)"| CB2["国际站\nwww.workbuddy.ai"]
     U -->|"billing / auth / growth"| CB
 ```
+
+账号按凭据 `edition` 字段选择上游站点 Profile（`internal/upstream/profile.go`），国内站与国际站可混挂同一池轮询。
 
 上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
 
@@ -383,6 +555,32 @@ curl -s http://localhost:7863/v1/chat/completions \
 - TTL 滚动续期（默认 30m），GC 周期 5m；绑定可镜像到 Redis（7 天 TTL）防重启丢失
 - 请求失败自动解绑；成功后绑定跟随最终成功账号
 
+> ⚠️ **会话粘性优先于选号策略**：同一会话首次成功后即绑定到某账号，后续多轮请求直接复用
+> 该绑定，**不再走选号策略**。这是正确设计（多轮上下文必须留在同一账号），但会表现为
+> "我把 A 置顶了，实际却还在用 B"——那个会话此前已绑定到 B。
+> 验证顺序调整是否生效时，请换一个新会话（不同 `conversation_id` / 不同首条消息），
+> 或临时设 `session_sticky.enabled: false`。
+
+### 选号策略与使用顺序
+
+默认策略是**三因子加权随机**，刻意打散热点、避免额度集中在单个账号。若需要**指定用号顺序**
+（如"先用主号，额度耗尽再动备用号"），可在面板「账号池 → 使用顺序」切换策略并拖排顺序。
+
+| 策略 | `pool.strategy` | 行为 |
+|---|---|---|
+| **加权随机**（默认） | `weighted` | 三因子加权（积分占比 ×10 + 闲置补偿 + 成功率 ×3）+ Top-5 加权随机。顺序**不参与**选号 |
+| **手动优先级** | `priority` | 按排定顺序取**第一个可用**账号；它冷却/禁用后才自动用下一个（不耗尽不换号） |
+| **轮流使用** | `round_robin` | 按顺序**轮流**使用，每次请求换下一个，均摊各号额度 |
+
+切换即时生效（热生效），并写回 `config.json` 持久化；**顺序**存在 `state.json` 的 `order` 字段，
+与账号状态同一次原子落盘，重启不丢。新添加的账号按 uid 升序追加到末尾（确定性，不会打乱已排顺序）。
+
+**排序不会改变账号的区域归属与可用性判定**：冷却/禁用/在途占满的账号会被自动跳过；
+区域收窄（`X-WB-Region`）与顺序叠加生效。
+
+> 优先级只在 `priority` / `round_robin` 下影响选号。`weighted` 下顺序**仍可保存**（便于先排好再切策略），
+> 接口会明确回一句"顺序暂不参与选号"，面板也会给提示，避免"排了序没生效"的困惑。
+
 ### 定时任务
 
 五类任务各自独立排程、各有开关，互不影响。容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
@@ -454,11 +652,11 @@ http://127.0.0.1:7863/panel/
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（总数/可用/冷却/禁用/可用积分合计/粘性会话）+ 账号表：状态标签（可用/限流冷却/积分冷却/熔断/已禁用）、积分量条、成功失败计数、在途、单号操作（签到/余额/任务/解冻/禁用/移除）；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」 |
-| **添加账号**（顶部按钮） | 浏览器内完成 OAuth 设备授权（显示授权链接 + 自动轮询），登录后凭证落盘并**热加载进池，免重启** |
-| **积分任务**（账号行内「任务」按钮） | 展示全部任务（进度 / 奖励分数与能量 / 状态）；「全部接受」批量报名；「一键完成」覆盖 **17 个任务**（推进进度 + 异步计分等待 + **自动领奖**，幂等可重复点）；其余任务展示操作指引 |
+| **账号池** | 统计条（总数/可用/冷却/禁用/可用积分合计/粘性会话）+ **站点筛选条**（全部/国内站/国际站，带可用·总数汇总）+ 账号表：**站点徽标**、状态标签（可用/限流冷却/积分冷却/熔断/已禁用）、积分量条、成功失败计数、在途、单号操作（签到/余额/任务/解冻/禁用/移除）；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」 |
+| **添加账号**（顶部按钮） | **选择站点**（国内站 / 国际站）后浏览器内完成 OAuth 设备授权（显示授权链接 + 自动轮询），登录后凭证落盘并**热加载进池，免重启**；国际站为浏览器内登录，等待窗口 15 分钟 |
+| **积分任务**（账号行内「任务」按钮） | 展示全部任务（进度 / 奖励分数与能量 / 状态）；「全部接受」批量报名；「一键完成」覆盖 **17 个任务**（推进进度 + 异步计分等待 + **自动领奖**，幂等可重复点）；其余任务展示操作指引。国际站账号无成长中心 → 按钮置灰并说明 |
 | **模型与档位** | 实时查询上游：每模型的积分倍率、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出 |
-| **配置** | 在线编辑 config.json：API 密钥、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏/粘性开关 |
+| **配置** | 在线编辑 config.json：API 密钥、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏/粘性开关；只读展示**上游站点**表（两站域名/登录方式/platform/成长中心/账号数） |
 | **运行日志** | 最近 500 行服务日志 + 请求表格日志（可开关自动滚动） |
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
@@ -481,17 +679,27 @@ http://127.0.0.1:7863/panel/
 
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB；可选 `X-WB-Region: cn\|intl` 头或 `model@intl` 后缀按站点收窄 |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存）；每模型带 `supported_efforts`/`default_effort` 实际思考档位（上游有返回时） |
-| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
-| `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性/站点）+ `regions` 按站点分组计数 |
+| `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识与 `regions` 分组（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+
+### 请求头：按站点收窄（可选）
+
+| 头 | 取值 | 说明 |
+|---|---|---|
+| `X-WB-Region` | `cn` / `intl` / `any`（或不带） | 仅使用该站点账号。收窄生效时响应带 `X-WB-Region-Applied`；目标站点无可用账号 → 503 `no_available_account_in_region`，**不跨站点回落** |
+
+等价写法：`model` 传 `glm-5.2@intl`（网关会剥离后缀再透传，适合无法自定义头的 OpenAI SDK）。不指定区域时行为与从前一致：**全池混挂轮询**。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
 ```json
-{"healthy": 2, "total": 3, "service": "workbuddy2api"}
+{"healthy": 2, "total": 3, "service": "workbuddy2api",
+ "regions": [{"region":"cn","label":"国内站","total":2,"healthy":2,"cooling":0,"disabled":0,"credits":0,"growth":true},
+             {"region":"intl","label":"国际站","total":1,"healthy":0,"cooling":0,"disabled":0,"credits":0,"growth":false}]}
 ```
 
 响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。

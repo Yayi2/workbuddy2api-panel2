@@ -267,10 +267,14 @@ func (p *Pool) List() []Status {
 }
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
+	region := e.a.Region()
 	st := Status{
 		UID:             uid,
 		Nickname:        e.a.Nickname,
 		Credits:         e.credits,
+		Region:          region,
+		RegionLabel:     auth.RegionLabel(region),
+		RegionGrowth:    isGrowthRegion(region),
 		Cooling:         now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:          e.reason,
 		Disabled:        e.disabled,
@@ -295,6 +299,13 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 			st.CoolRemaining = 0
 		}
 		st.CoolKind = e.coolKind.String()
+		// 模型级 6004 限流：透出模型名，面板显示"限流冷却（glm-5.2）"并提示切模型可用。
+		// 仅当冷却仍是那次模型级软冷却时标注（softRateModel 已被后续账号级冷却清空的场景
+		// 由 coolKind/softRateModel 的一致性保证，见 Cooldown 的清理逻辑）。
+		if e.coolKind == CoolSoft && e.softRateModel != "" {
+			st.ModelRateLimit = true
+			st.ModelRateModel = e.softRateModel
+		}
 	}
 	return st
 }

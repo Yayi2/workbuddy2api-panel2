@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -126,8 +127,24 @@ func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 // 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
 const modelRateLimitCode = "6004"
 
-// softRateResetRe 匹配「将在 … 重置」，捕获中间的时间串。
+// softRateResetRe 匹配中文文案「将在 … 重置」（国内站），捕获中间的时间串。
 const softRateResetRe = `将在 (.+?) 重置`
+
+// softRateResetReEN 匹配英文文案「will reset at …」（国际站），捕获中间的时间串。
+//
+// 国际站（www.workbuddy.ai）的 6004 文案是英文：
+//
+//	{"code":6004,"msg":"usage exceeds frequency limit, but don't worry,
+//	 your usage will reset at 2026-09-14 22:09:42 UTC+8,
+//	 alternatively, you can switch to the other models to continue using it."}
+//
+// 只认中文正则会让国际站的 6004 **解析不出重置时间**，退化成固定 soft_rate（默认 600s）
+// 基数——而上游明说的时间可能是十小时后。后果是该账号每 10 分钟被重新选中一次、
+// 再次 429、再冷却，反复空转（实测于 2026-09 用户真实日志）。
+//
+// 捕获组用 `[\d\-: ]+?` 而非 `.+?`：精确锚定"日期 时间"形态，避免把
+// "at <其他文本> UTC+8" 之类误当时间；结尾的 UTC+8 可选（有的文案不带）。
+const softRateResetReEN = `reset at ([\d\-]+ [\d:]+)(?: UTC\+8)?`
 
 // softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
 const softRateTimeLayout = "2006-01-02 15:04:05"
@@ -140,26 +157,31 @@ func IsModelRateLimit(body string) bool {
 	return re.MatchString(body)
 }
 
-// ParseSoftRateReset 从 429 body 解析「将在 … 重置」时间（上游 UTC+8 文案）。
+// ParseSoftRateReset 从 429 body 解析重置时间（同时支持国内站中文与国际站英文文案）。
 // 成功返回解析出的**墙钟时刻**（按 UTC+8 解释），失败返回零值 + false。
+//
 // 内部先判 IsModelRateLimit：非模型级限流（非 6004）即使带"重置"字样也不返回——该重置
 // 无冷却语义（如 11140 的通用限流提示），解析出来反而会错误收窄冷却。
+//
+// 双语支持的原因见 softRateResetReEN 注释：只认中文会让国际站账号的冷却
+// 退化成固定 600s，导致"冷却→重试→又 429"的空转循环。
 func ParseSoftRateReset(body string) (time.Time, bool) {
 	if !IsModelRateLimit(body) {
 		return time.Time{}, false
 	}
-	re := regexp.MustCompile(softRateResetRe)
-	m := re.FindStringSubmatch(body)
-	if len(m) < 2 {
-		return time.Time{}, false
+	// 先中文（国内站），再英文（国际站）。两者互斥，顺序不影响结果。
+	for _, re := range []string{softRateResetRe, softRateResetReEN} {
+		m := regexp.MustCompile(re).FindStringSubmatch(body)
+		if len(m) < 2 {
+			continue
+		}
+		ts := strings.TrimSpace(m[1])
+		ts = strings.TrimSuffix(ts, " UTC+8") // 去掉后缀（英文组可能已剥离），固定按 UTC+8 解释
+		if t, err := time.ParseInLocation(softRateTimeLayout, ts, softRateResetLoc); err == nil {
+			return t, true
+		}
 	}
-	ts := strings.TrimSpace(m[1])
-	ts = strings.TrimSuffix(ts, " UTC+8") // 去掉后缀，固定按 softRateResetLoc 解释
-	t, err := time.ParseInLocation(softRateTimeLayout, ts, softRateResetLoc)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
+	return time.Time{}, false
 }
 
 // Classify 按 HTTP 状态码 + body 判定错误类别。
@@ -269,9 +291,18 @@ type Client struct {
 	// WebBaseCN 官网（workbuddy.cn）域：部分「任务领奖」类接口只在此域提供
 	// （Web 成长中心用；CLI 域 copilot.tencent.com 的同名路径返回 400）。
 	WebBaseCN string
+
+	// regionMu/overrides 站点配置覆盖（SetRegionOverrides 注入；空 = 用内置实测值）。
+	// 读多写极少的 map，用 RWMutex 保护而非 atomic 快照（写入仅发生在启动装配期）。
+	regionMu  sync.RWMutex
+	overrides map[string]RegionOverrides
 }
 
 // New 生产默认值。配置连接池减少 TLS 握手。
+//
+// 三个 *BaseCN 字段留空：生产路径由账号 region 决定站点（见 profile.go），
+// 空值即"未注入测试服务器"，走 Profile 内置域名。测试通过设置这些字段
+// 指向 httptest 服务器（非空优先），从而无需 mock 真实站点。
 func New() *Client {
 	tr := &http.Transport{
 		MaxIdleConns:        100,
@@ -284,9 +315,6 @@ func New() *Client {
 		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP:             &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
 		SanitizeFingerprints: true,
-		ChatBaseCN:           "https://copilot.tencent.com",
-		BillingBaseCN:        "https://www.codebuddy.cn",
-		WebBaseCN:            "https://www.workbuddy.cn",
 	}
 }
 
@@ -298,8 +326,16 @@ func (c *Client) chatHTTP() *http.Client {
 	return c.HTTP
 }
 
+// chatBase 返回聊天/growth 域基址。
+//
+// 优先级：ChatBaseCN 非空（测试注入 httptest / 历史显式覆盖）> 账号 region 对应
+// Profile（含配置覆盖）> 国内站内置值。生产路径 ChatBaseCN 为空，按 region 分流：
+// 国内站 copilot.tencent.com，国际站 www.workbuddy.ai。
 func (c *Client) chatBase(a *auth.Auth) string {
-	return c.ChatBaseCN
+	if c.ChatBaseCN != "" {
+		return c.ChatBaseCN
+	}
+	return c.profileFor(a).ChatBase
 }
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
@@ -321,16 +357,21 @@ func (c *Client) effortsSnapshot() map[string][]string {
 	return cp
 }
 
+// billingBase 返回计费/活动域基址（优先级同 chatBase）。
 func (c *Client) billingBase(a *auth.Auth) string {
-	return c.BillingBaseCN
+	if c.BillingBaseCN != "" {
+		return c.BillingBaseCN
+	}
+	return c.profileFor(a).BillingBase
 }
 
-// webBase 返回官网域（任务领奖类接口；未注入时回落默认）。
-func (c *Client) webBase() string {
+// webBase 返回官网域（任务领奖类接口）。领奖接口只接受 Web 端请求头形状，
+// 故必须与账号站点一致：国内站 workbuddy.cn，国际站 workbuddy.ai（同域部署）。
+func (c *Client) webBase(a *auth.Auth) string {
 	if c.WebBaseCN != "" {
 		return c.WebBaseCN
 	}
-	return "https://www.workbuddy.cn"
+	return c.profileFor(a).WebBase
 }
 
 // billing 域端点路径（billingBase + path）。balance/checkin 与 report（report.go）同域，
@@ -454,9 +495,23 @@ type ModelInfo struct {
 	Credits       string   // credits：积分倍率（如 "x0.79"）
 }
 
+// ErrModelsUnsupported 该站点不提供模型清单接口（国际站实测返回裸 HTML 500）。
+//
+// 定义成哨兵错误而非字符串：调用方（面板 / 路由层）需要区分"站点本就不支持"
+// 与"上游临时故障"，前者应静默换号或回退静态表，后者才值得报错给用户。
+var ErrModelsUnsupported = errors.New("该站点不提供模型清单接口")
+
 // FetchModels 调上游动态模型接口。
 // 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
+//
+// 站点限制：`/console/enterprises/personal/models` 是**国内站控制台路由**，国际站
+// 未挂载（实测裸 HTML 500，详见 Profile.ModelsAPI）。对国际站账号直接返回
+// ErrModelsUnsupported，不发那个注定失败的请求——既省一次网络往返，也让
+// 调用方能给出准确提示而不是把一段 HTML 报错抛给用户。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+	if !SupportsModelsAPIForAuth(a) {
+		return nil, ErrModelsUnsupported
+	}
 	url := c.chatBase(a) + "/console/enterprises/personal/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -471,7 +526,14 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 返回**带分类的** *Error（而非裸 fmt.Errorf）：调用方（面板）据此给出
+		// 可读归因（"凭证无效，请重新登录" / "上游限流"），而不是把上游网关那段
+		// HTML 错误页原样透给用户。Classify 复用既有错误分类口径。
+		return nil, &Error{
+			Kind:   Classify(resp.StatusCode, string(raw)),
+			Status: resp.StatusCode,
+			Msg:    truncate(string(raw), 120),
+		}
 	}
 	var env struct {
 		Code int `json:"code"`

@@ -246,11 +246,53 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+// growthAccounts 返回**支持成长中心**的账号（站点能力过滤）。
+//
+// 统一给 streak / activity / travel / school / blackcat 等"依赖国内站成长中心
+// 判据体系"的排程循环使用：这些循环原先都只判 Disabled/Token，未判站点，
+// 导致混挂池下每个排程周期都对国际站账号盲发一批必然失败的请求
+//（国际站 /v2/activity/growth/tasks 返回的是另一套 schema，streak 直接 500，
+// /v2/report 返回 code=10001），把日志刷满且掩盖真实故障。
+//
+// 余额刷新与保活**不**走这里——那两项国际站可用（见 RunBalanceRefreshNow /
+// RunKeepaliveNow 与 upstream.Profile 的 BalanceAPI）。
+func (s *Scheduler) growthAccounts(needToken bool) []*auth.Auth {
+	var out []*auth.Auth
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil {
+			continue
+		}
+		if !upstream.IsGrowthRegion(a.Region()) {
+			continue
+		}
+		if needToken && a.AccessToken == "" {
+			continue
+		}
+		if !needToken && a.RefreshToken == "" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 // 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
 // 末尾追加连登管家（streak.go）：可兑换档位自动兑换 + 抽奖次数自动抽完——
 // 连登兑换按天数解锁，挂在每日签到后即「到天数那天自动完成兑换→抽奖闭环」。
+//
+// **站点按能力分流**（2026-09 真实 token 实测）：
+//   - 签到仅国内站（国际站 daily-checkin 返回 code=10001「签到活动未开启或已过期」，
+//     属常态而非故障，每天盲发只会刷错误日志）；
+//   - 余额刷新**两站都做**（国际站计费域同域部署、路径一致，实测返回完整套餐数据）。
+//
+// 若不分流，每天签到排程会对国际站账号产生「签到失败 + 连登/开学季连环失败」的
+// 噪声日志，且用户会误以为账号有问题。
 func (s *Scheduler) RunCheckinNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -260,9 +302,15 @@ func (s *Scheduler) RunCheckinNow() {
 		if a == nil || a.RefreshToken == "" {
 			continue
 		}
-		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-			log.Printf("checkin %s: %v", st.UID, err)
-			// 已签到等业务错误也继续走余额查询
+		region := a.Region()
+		if upstream.SupportsCheckin(region) {
+			if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+				log.Printf("checkin %s: %v", st.UID, err)
+				// 已签到等业务错误也继续走余额查询
+			}
+		}
+		if !upstream.SupportsBalanceAPI(region) {
+			continue
 		}
 		remain, err := s.cfg.Upstream.UserResource(a)
 		if err != nil {
@@ -282,14 +330,9 @@ func (s *Scheduler) RunCheckinNow() {
 // 「上报 200 但 streak 没涨」的静默丢弃（只读 oracle，不做重试）。
 func (s *Scheduler) RunActivityNow() {
 	first := true
-	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
-			continue
-		}
-		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.AccessToken == "" {
-			continue
-		}
+	// 活跃上报走 /v2/report（国内站判据体系）；国际站该通道返回 code=10001，
+	// 故由 growthAccounts 过滤——否则每日 10 点都会对国际站账号刷失败日志。
+	for _, a := range s.growthAccounts(true) {
 		if !first {
 			time.Sleep(activityAccountDelay)
 		}

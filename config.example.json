@@ -30,6 +30,24 @@
     "idle_timeout_seconds": 300,
     "user_agent": ""
   },
+  "regions": {
+    "cn": {
+      "chat_base": "",
+      "billing_base": "",
+      "web_base": "",
+      "origin": "",
+      "platform": "",
+      "user_agent": ""
+    },
+    "intl": {
+      "chat_base": "",
+      "billing_base": "",
+      "web_base": "",
+      "origin": "",
+      "platform": "",
+      "user_agent": ""
+    }
+  },
   "features": {
     "sanitize_blacklist_fingerprints": true
   },
@@ -42,6 +60,7 @@
     "token": ""
   },
   "pool": {
+    "strategy": "weighted",
     "max_in_flight": 3,
     "breaker_threshold": 3,
     "breaker_cooldown": "30m",
